@@ -1,6 +1,6 @@
 {
-  "max_trades_day": 10,
-  "max_daily_loss": 999.0,
+  "max_trades_day": 99,
+  "max_daily_loss": 9999.0,
   "signal_threshold": 4,
   "demo_mode": true,
   "trade_audusd": true,

@@ -130,7 +130,7 @@ ASSETS = {
 
 def load_settings():
     default = {
-        "max_trades_day":    4,       # Target 4 trades/day for 60% win rate
+        "max_trades_day":    10,      # Demo testing - allow more trades
         "max_daily_loss":    40.0,
         "signal_threshold":  4,
         "demo_mode":         True,
@@ -340,44 +340,20 @@ def run_bot(state=None):
     with open(trade_log, "w") as f:
         json.dump(today, f, indent=2)
 
-    # Daily loss protection
-    if today.get("stopped"):
-        alert.send(
-            "🔄 DEMO 2 Bot stopped for today\n"
-            "Daily limit hit!\n"
-            "Realized: $" + str(round(realized_pnl, 2)) + " USD\n"
-            "Resumes tomorrow!"
-        )
-        return
-
+    # Daily loss protection DISABLED for demo testing
+    # Bot keeps trading regardless of daily loss
     if realized_pnl <= -settings["max_daily_loss"]:
-        today["stopped"] = True
-        if state is None:
-            with open(trade_log, "w") as f:
-                json.dump(today, f, indent=2)
+        log.warning("Daily loss limit reached $" + str(abs(round(realized_pnl, 2))) + " but continuing (demo mode)")
         alert.send(
-            "🔴 DEMO 2 DAILY LOSS LIMIT HIT!\n"
-            "Loss: $" + str(abs(round(realized_pnl, 2))) + " USD\n"
+            "⚠️ DEMO 2 Daily loss $" + str(abs(round(realized_pnl, 2))) + " USD\n"
             "Limit: $" + str(settings["max_daily_loss"]) + " USD\n"
-            "Bot stopped! Resumes tomorrow."
+            "Continuing for demo testing! 🧪"
         )
-        return
 
-    # Consecutive loss protection
+    # Consecutive loss warning (not stopping - demo testing mode)
     consec = today.get("consec_losses", 0)
     if consec >= settings.get("max_consec_losses", 2):
-        today["stopped"] = True
-        if state is None:
-            with open(trade_log, "w") as f:
-                json.dump(today, f, indent=2)
-        alert.send(
-            "⛔ DEMO 2: 2 CONSECUTIVE LOSSES!\n"
-            "Protecting capital!\n"
-            "Stopped for today.\n"
-            "Realized: $" + str(round(realized_pnl, 2)) + " USD\n"
-            "Resumes tomorrow!"
-        )
-        return
+        log.warning("Consecutive losses: " + str(consec) + " but continuing (demo mode)")
 
     # Max trades
     if today["trades"] >= settings["max_trades_day"]:

@@ -249,7 +249,7 @@ def set_cooldown(today, instrument):
         today["cooldowns"] = {}
     today["cooldowns"][instrument] = datetime.utcnow().isoformat()
 
-def run_bot():
+def run_bot(state=None):
     log.info("OANDA Bot Demo 2 - Mean Reversion starting!")
     settings = load_settings()
     sg_tz    = pytz.timezone("Asia/Singapore")
@@ -297,25 +297,33 @@ def run_bot():
     current_balance = trader.get_balance()
     mode            = "DEMO2" if settings["demo_mode"] else "LIVE"
 
-    # Load today log
+    # ── STATE MANAGEMENT (in-memory for Railway, file for GitHub Actions) ──
     trade_log = "trades_" + now.strftime("%Y%m%d") + ".json"
-    try:
-        with open(trade_log) as f:
-            today = json.load(f)
-    except FileNotFoundError:
-        today = {
-            "trades":        0,
-            "start_balance": current_balance,
-            "daily_pnl":     0.0,
-            "stopped":       False,
-            "wins":          0,
-            "losses":        0,
-            "consec_losses": 0,
-            "cooldowns":     {}
-        }
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
-        log.info("New day! Start balance: $" + str(round(current_balance, 2)))
+    if state is not None:
+        # Railway mode: use in-memory state passed from main.py
+        today = state
+        if "start_balance" not in today:
+            today["start_balance"] = current_balance
+            log.info("New day! Start balance: $" + str(round(current_balance, 2)))
+    else:
+        # GitHub Actions mode: use file-based state
+        try:
+            with open(trade_log) as f:
+                today = json.load(f)
+        except FileNotFoundError:
+            today = {
+                "trades":        0,
+                "start_balance": current_balance,
+                "daily_pnl":     0.0,
+                "stopped":       False,
+                "wins":          0,
+                "losses":        0,
+                "consec_losses": 0,
+                "cooldowns":     {}
+            }
+            with open(trade_log, "w") as f:
+                json.dump(today, f, indent=2)
+            log.info("New day! Start balance: $" + str(round(current_balance, 2)))
 
     # PnL tracking
     start_balance = today.get("start_balance", current_balance)
@@ -344,8 +352,9 @@ def run_bot():
 
     if realized_pnl <= -settings["max_daily_loss"]:
         today["stopped"] = True
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
+        if state is None:
+            with open(trade_log, "w") as f:
+                json.dump(today, f, indent=2)
         alert.send(
             "🔴 DEMO 2 DAILY LOSS LIMIT HIT!\n"
             "Loss: $" + str(abs(round(realized_pnl, 2))) + " USD\n"
@@ -358,8 +367,9 @@ def run_bot():
     consec = today.get("consec_losses", 0)
     if consec >= settings.get("max_consec_losses", 2):
         today["stopped"] = True
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
+        if state is None:
+            with open(trade_log, "w") as f:
+                json.dump(today, f, indent=2)
         alert.send(
             "⛔ DEMO 2: 2 CONSECUTIVE LOSSES!\n"
             "Protecting capital!\n"

@@ -487,66 +487,73 @@ def run_bot():
         score, direction, details = signals.analyze(asset=config["asset"])
         log.info(name + ": score=" + str(score) + " dir=" + direction + " | " + details)
 
-        if score < settings["signal_threshold"] or direction == "NONE":
-            scan_results.append(config["emoji"] + " " + name + ": " + str(score) + "/5 no mean reversion setup")
+        if score < 3 or direction == "NONE":
+            scan_results.append(config["emoji"] + " " + name + ": " + str(score) + "/5 no setup")
             continue
 
-        # Fixed TP/SL only - dynamic BB TP was too far (20-50 pips = hrs to reach)
-        # Small fixed TP = price hits target within 1 hour
         tp_pips   = config["tp_pips"]
         stop_pips = config["stop_pips"]
 
-        # Position sizing
-        # Fixed 0.10 lots - no dynamic sizing
-        size       = calc_position_size(config["pip"], config)
-        max_loss   = round(size * stop_pips * config["pip"], 2)
-        max_profit = round(size * tp_pips * config["pip"], 2)
+        # ── SCALING IN: up to 3 simultaneous trades per pair ─────────
+        # Score 3/5 → T1: 0.05 lots
+        # Score 4/5 → T1 + T2: 0.10 lots
+        # Score 5/5 → T1 + T2 + T3: 0.15 lots
+        tiers = []
+        if score >= 3: tiers.append({"label": "T1", "size": 5000})
+        if score >= 4: tiers.append({"label": "T2", "size": 10000})
+        if score >= 5: tiers.append({"label": "T3", "size": 15000})
 
-        log.info(name + " size=" + str(size) + " stop=" + str(stop_pips) +
-                 " tp=" + str(tp_pips) + " (dynamic=" + str(dynamic_tp is not None) + ")")
+        if "open_tiers" not in today: today["open_tiers"] = {}
+        if "open_times" not in today: today["open_times"] = {}
+        open_tier_labels = today["open_tiers"].get(name, [])
 
-        # Place order
-        result = trader.place_order(
-            instrument     = name,
-            direction      = direction,
-            size           = size,
-            stop_distance  = stop_pips,
-            limit_distance = tp_pips
-        )
+        for tier in tiers:
+            if tier["label"] in open_tier_labels:
+                scan_results.append(config["emoji"] + " " + name + " " + tier["label"] + ": already open")
+                continue
 
-        if result["success"]:
-            today["trades"]       += 1
-            today["consec_losses"] = 0
-            # Track trade open time for max duration check
-            if "open_times" not in today:
-                today["open_times"] = {}
-            today["open_times"][name] = now.isoformat()
-            with open(trade_log, "w") as f:
-                json.dump(today, f, indent=2)
+            size       = tier["size"]
+            lots       = str(round(size / 10000, 2))
+            max_loss   = round(size * stop_pips * config["pip"], 2)
+            max_profit = round(size * tp_pips   * config["pip"], 2)
 
-            price, _, _ = trader.get_price(name)
-            tp_type     = "Dynamic BB" if dynamic_tp else "Fixed"
-            alert.send(
-                "🔄 DEMO 2 NEW TRADE! " + mode + "\n"
-                + config["emoji"] + " " + name + "\n"
-                "Strategy:  Mean Reversion\n"
-                "Direction: " + direction + "\n"
-                "Score:     " + str(score) + "/5\n"
-                "Entry:     " + str(round(price, config["precision"])) + "\n"
-                "Size:      " + str(size) + " units\n"
-                "Stop Loss: " + str(stop_pips) + " pips = $" + str(max_loss) + "\n"
-                "Take Prof: " + str(tp_pips) + " pips = $" + str(max_profit) + " (" + tp_type + ")\n"
-                "Spread:    " + str(round(spread_val, 1)) + " pips\n"
-                "Trade #" + str(today["trades"]) + "/" + str(settings["max_trades_day"]) + "\n"
-                "Session: " + session + "\n"
-                "Signals: " + details
+            result = trader.place_order(
+                instrument     = name,
+                direction      = direction,
+                size           = size,
+                stop_distance  = stop_pips,
+                limit_distance = tp_pips
             )
-            scan_results.append(config["emoji"] + " " + name + ": " + direction + " PLACED! " + str(score) + "/5")
-        else:
-            set_cooldown(today, name)
-            with open(trade_log, "w") as f:
-                json.dump(today, f, indent=2)
-            scan_results.append(config["emoji"] + " " + name + ": order failed")
+
+            if result["success"]:
+                today["trades"] = today.get("trades", 0) + 1
+                today["consec_losses"] = 0
+                if name not in today["open_tiers"]: today["open_tiers"][name] = []
+                today["open_tiers"][name].append(tier["label"])
+                today["open_times"][name + "_" + tier["label"]] = now.isoformat()
+                with open(trade_log, "w") as f:
+                    json.dump(today, f, indent=2)
+
+                price, _, _ = trader.get_price(name)
+                alert.send(
+                    "🔄 DEMO 2 " + tier["label"] + " TRADE!\n"
+                    + config["emoji"] + " " + name + "\n"
+                    "Direction: " + direction + "\n"
+                    "Score:     " + str(score) + "/5 → " + tier["label"] + "\n"
+                    "Size:      " + lots + " lots\n"
+                    "Entry:     " + str(round(price, config["precision"])) + "\n"
+                    "Stop Loss: " + str(stop_pips) + " pips = $" + str(max_loss) + "\n"
+                    "Take Prof: " + str(tp_pips)   + " pips = $" + str(max_profit) + "\n"
+                    "Spread:    " + str(round(spread_val, 1)) + " pips\n"
+                    "Session:   " + session + "\n"
+                    "Signals:   " + details
+                )
+                scan_results.append(config["emoji"] + " " + name + " " + tier["label"] + ": " + direction + " " + lots + "lots ✅")
+            else:
+                set_cooldown(today, name)
+                with open(trade_log, "w") as f:
+                    json.dump(today, f, indent=2)
+                scan_results.append(config["emoji"] + " " + name + " " + tier["label"] + ": order failed")
 
     # Summary
     target_hit = realized_pnl >= 22

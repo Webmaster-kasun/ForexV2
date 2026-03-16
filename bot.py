@@ -118,8 +118,8 @@ ASSETS = {
         "asset":       "EURUSD",
         "emoji":       "🇪🇺💵",
         "setting":     "trade_eurusd",
-        "stop_pips":   8,     # $8 max loss — tight SL for fast exit
-        "tp_pips":     12,    # $12 max profit → R:R 1:1.5
+        "stop_pips":   15,    # Widened: EUR/USD moves fast, needs breathing room
+        "tp_pips":     22,    # R:R 1:1.5 with wider SL
         "pip":         0.0001,
         "precision":   5,
         "min_atr":     0.0003,

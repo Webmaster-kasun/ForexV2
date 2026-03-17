@@ -1,303 +1,151 @@
 """
 OANDA Trading Bot - Demo Account 2
-====================================
-Strategy: Mean Reversion
-- Bollinger Bands (20, 2) entry signals
-- RSI extremes confirmation (< 35 BUY / > 65 SELL)
-- ATR ranging filter (skip if trending)
-- Dynamic TP = Middle Bollinger Band
-- Same risk controls as Demo 1
+=====================================
+Strategy 1: Mean Reversion  → AUD/USD (Asian), EUR/GBP (London)
+Strategy 2: Trend Following → EUR/USD (London + NY)
+
+Session Rules (SGT):
+  AUD/USD  active: 6am  - 11am  (Asian)
+  EUR/GBP  active: 2pm  - 7pm   (London)
+  EUR/USD  active: 2pm  - 11pm  (London + NY)
+
+Bot sleeps silently outside active hours.
+Score 4/5 minimum to trade.
 """
 
 import os
 import json
+import time
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
-from oanda_trader import OandaTrader
-from signals import SignalEngine
+from signals       import SignalEngine
+from oanda_trader  import OandaTrader
 from telegram_alert import TelegramAlert
-from calendar_filter import EconomicCalendar
+from calendar_filter import CalendarFilter
 
-# Safe logging - never expose API keys
-class SafeFormatter(logging.Formatter):
-    def format(self, record):
-        msg = super().format(record)
-        key = os.environ.get("OANDA_API_KEY", "")
-        if key and key in msg:
-            msg = msg.replace(key, "***")
-        return msg
-
-handler      = logging.StreamHandler()
-handler.setFormatter(SafeFormatter("%(asctime)s | %(levelname)s | %(message)s"))
-file_handler = logging.FileHandler("performance_log.txt")
-file_handler.setFormatter(SafeFormatter("%(asctime)s | %(levelname)s | %(message)s"))
-
-logging.basicConfig(level=logging.INFO, handlers=[handler, file_handler])
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# ── ASSET CONFIGURATION ──────────────────────────────────────────────────────
-# MEAN REVERSION BEST PAIRS (5-year analysis):
-# AUD/USD  → ranges for weeks, China-sensitive, slow grinding = perfect MR
-# EUR/GBP  → extremely tight range 0.84-0.92, always reverts = perfect MR
-# USD/CHF  → SNB keeps it rangy, mirrors EUR/USD inversely = perfect MR
-# XAG/USD  → follows gold but spikier, reversals common = perfect MR
-# MAX TRADE DURATION = 4 hours for day trading
-# Force close if trade runs longer than max_hours
-# ── FAST TRADE CONFIG ────────────────────────────────────────────────────────
-# Target: trades complete within 1 hour max
-# Logic:  Small TP/SL = price hits target quickly
-# M15 signals used = faster entry/exit timing
-#
-# Per trade P&L at 0.10 lots ($1/pip):
-# AUD/USD: SL=8pips=$8   TP=12pips=$12  R:R=1:1.5
-# EUR/GBP: SL=6pips=$6   TP=9pips=$9    R:R=1:1.5
-# USD/CHF: SL=8pips=$8   TP=12pips=$12  R:R=1:1.5
-# XAG/USD: SL=30pips=$3  TP=45pips=$4.5 R:R=1:1.5  (100oz, pip=0.01)
+sg_tz   = pytz.timezone("Asia/Singapore")
+signals = SignalEngine()
 
-MAX_TRADE_HOURS = 1   # Hard limit: 1 hour max per trade
-
+# ── ASSET CONFIG ─────────────────────────────────────────────────────────────
 ASSETS = {
     "AUD_USD": {
-        "instrument":  "AUD_USD",
-        "asset":       "AUDUSD",
-        "emoji":       "🦘",
-        "setting":     "trade_audusd",
-        "stop_pips":   8,     # $8 max loss
-        "tp_pips":     12,    # $12 max profit → R:R 1:1.5
-        "pip":         0.0001,
-        "precision":   5,
-        "min_atr":     0.0003,
-        "max_hours":   1,
-        "session_hours": [(6, 11), (14, 17)],
+        "instrument": "AUD_USD",
+        "asset":      "AUDUSD",
+        "emoji":      "🦘",
+        "strategy":   "mean_reversion",
+        "pip":        0.0001,
+        "precision":  5,
+        "stop_pips":  8,    # $8 max loss
+        "tp_pips":    12,   # $12 max profit — R:R 1:1.5
+        "session_start": 6,
+        "session_end":   11,
     },
     "EUR_GBP": {
-        "instrument":  "EUR_GBP",
-        "asset":       "EURGBP",
-        "emoji":       "🇪🇺",
-        "setting":     "trade_eurgbp",
-        "stop_pips":   6,     # $6 max loss  (tight range pair = small moves)
-        "tp_pips":     9,     # $9 max profit → R:R 1:1.5
-        "pip":         0.0001,
-        "precision":   5,
-        "min_atr":     0.0002,
-        "max_hours":   1,
-        "session_hours": [(14, 19)],
-    },
-    "USD_CHF": {
-        "instrument":  "USD_CHF",
-        "asset":       "USDCHF",
-        "emoji":       "🇨🇭",
-        "setting":     "trade_usdchf",
-        "stop_pips":   8,     # $8 max loss
-        "tp_pips":     12,    # $12 max profit → R:R 1:1.5
-        "pip":         0.0001,
-        "precision":   5,
-        "min_atr":     0.0003,
-        "max_hours":   1,
-        "session_hours": [(14, 23), (0, 1)],
-    },
-    "XAG_USD": {
-        "instrument":  "XAG_USD",
-        "asset":       "XAGUSD",
-        "emoji":       "🥈",
-        "setting":     "trade_silver",
-        "stop_pips":   30,    # 30 × 0.01 × 100oz = $3 max loss
-        "tp_pips":     45,    # 45 × 0.01 × 100oz = $4.5 max profit → R:R 1:1.5
-        "pip":         0.01,
-        "precision":   2,
-        "lot_size":    100,
-        "min_atr":     0.05,
-        "max_hours":   1,
-        "session_hours": [(14, 23), (0, 1)],
+        "instrument": "EUR_GBP",
+        "asset":      "EURGBP",
+        "emoji":      "🇪🇺",
+        "strategy":   "mean_reversion",
+        "pip":        0.0001,
+        "precision":  5,
+        "stop_pips":  6,    # $6 max loss
+        "tp_pips":    9,    # $9 max profit — R:R 1:1.5
+        "session_start": 14,
+        "session_end":   19,
     },
     "EUR_USD": {
-        "instrument":  "EUR_USD",
-        "asset":       "EURUSD",
-        "emoji":       "🇪🇺💵",
-        "setting":     "trade_eurusd",
-        "stop_pips":   15,    # Widened: EUR/USD moves fast, needs breathing room
-        "tp_pips":     22,    # R:R 1:1.5 with wider SL
-        "pip":         0.0001,
-        "precision":   5,
-        "min_atr":     0.0003,
-        "max_hours":   1,     # 1hr hard limit
-        "session_hours": [(14, 22)],  # London + NY only (best EUR/USD hours)
+        "instrument": "EUR_USD",
+        "asset":      "EURUSD",
+        "emoji":      "🇪🇺💵",
+        "strategy":   "trend_following",
+        "pip":        0.0001,
+        "precision":  5,
+        "stop_pips":  15,   # Wider SL for trend trades
+        "tp_pips":    30,   # 1:2 RR — trend trades need bigger TP
+        "session_start": 14,
+        "session_end":   23,
     },
 }
 
+# ── DEFAULTS ─────────────────────────────────────────────────────────────────
+DEFAULT_SETTINGS = {
+    "signal_threshold": 4,
+    "demo_mode":        True,
+    "max_spread_pips":  2,
+}
+
 def load_settings():
-    default = {
-        "max_trades_day":    4,       # Target 4 trades/day for 60% win rate
-        "max_daily_loss":    40.0,
-        "signal_threshold":  4,
-        "demo_mode":         True,
-        "trade_audusd":      True,
-        "trade_eurgbp":      True,
-        "trade_usdchf":      True,
-        "trade_silver":      True,
-        "trade_eurusd":      True,   # EUR/USD - most liquid pair added back!
-        "fixed_lot_size":     0.10,
-        "max_consec_losses": 2,
-        "max_spread_pips":   2,
-        "strategy":          "mean_reversion",
-    }
     try:
         with open("settings.json") as f:
             saved = json.load(f)
-            default.update(saved)
+        DEFAULT_SETTINGS.update(saved)
     except FileNotFoundError:
         with open("settings.json", "w") as f:
-            json.dump(default, f, indent=2)
-    return default
+            json.dump(DEFAULT_SETTINGS, f, indent=2)
+    return DEFAULT_SETTINGS
 
-def calc_position_size(pip_value, config=None):
-    """
-    Fixed lot sizes:
-    Forex   = 10,000 units (0.10 lots) → $1 per pip
-    Silver  = 100 oz                   → $1 per pip (pip=0.01)
-    """
-    # Use lot_size from config if provided
-    if config and "lot_size" in config:
-        return config["lot_size"]
-    if pip_value <= 0.0001:
-        return 10000   # 0.10 lots forex → $1/pip
-    elif pip_value == 0.01:
-        return 100     # 100 oz silver  → $1/pip
-    else:
-        return 10000
+def is_in_session(hour, config):
+    """Check if current hour is within pair's active session"""
+    start = config["session_start"]
+    end   = config["session_end"]
+    return start <= hour < end
 
-def get_bb_tp_pips(trader, instrument, direction, pip, precision):
-    """
-    Dynamic TP = Middle Bollinger Band (20 EMA on H1)
-    This is the CORE of mean reversion - we target the mean!
-    """
-    try:
-        import math
-        url    = trader.base_url + "/v3/instruments/" + instrument + "/candles"
-        params = {"count": "50", "granularity": "H1", "price": "M"}
-        r      = requests.get(url, headers=trader.headers, params=params, timeout=10)
-        if r.status_code != 200:
-            return None
-
-        candles = r.json()["candles"]
-        closes  = [float(c["mid"]["c"]) for c in candles if c["complete"]]
-        if len(closes) < 20:
-            return None
-
-        # Calculate BB middle (20 SMA)
-        recent = closes[-20:]
-        middle = sum(recent) / 20
-
-        # Current price
-        price, _, _ = trader.get_price(instrument)
-        if not price:
-            return None
-
-        # Distance from current price to middle band in pips
-        distance_pips = abs(price - middle) / pip
-        log.info(instrument + " BB middle=" + str(round(middle, precision)) +
-                 " price=" + str(round(price, precision)) +
-                 " TP_pips=" + str(round(distance_pips, 1)))
-
-        # Minimum TP = 10 pips (not worth trading if too close to mean)
-        if distance_pips < 10:
-            return None
-
-        return round(distance_pips)
-
-    except Exception as e:
-        log.warning("BB TP calc error: " + str(e))
-        return None
-
-def check_spread(trader, instrument, max_spread_pips, pip):
-    """Skip trade if spread too wide"""
-    try:
-        bid, ask, _ = trader.get_price(instrument)
-        if bid is None:
-            return True, 0
-        bid_val, ask_val = ask, bid  # get_price returns mid, bid, ask
-        # Re-fetch properly
-        mid, bid_val, ask_val = trader.get_price(instrument)
-        spread_pips = (ask_val - bid_val) / pip
-        log.info(instrument + " spread=" + str(round(spread_pips, 1)) + " pips")
-        if spread_pips > max_spread_pips:
-            log.warning(instrument + " spread too wide: " + str(round(spread_pips, 1)))
-            return False, spread_pips
-        return True, spread_pips
-    except Exception as e:
-        log.warning("Spread check error: " + str(e))
-        return True, 0
-
-def is_in_cooldown(today, instrument):
-    cooldowns = today.get("cooldowns", {})
-    if instrument not in cooldowns:
-        return False
-    last_loss  = datetime.fromisoformat(cooldowns[instrument])
-    wait_until = last_loss + timedelta(minutes=30)
-    now_utc    = datetime.utcnow()
-    if now_utc < wait_until:
-        mins = int((wait_until - now_utc).seconds / 60)
-        log.info(instrument + " cooldown " + str(mins) + " mins left")
-        return True
-    return False
-
-def set_cooldown(today, instrument):
+def set_cooldown(today, name):
     if "cooldowns" not in today:
         today["cooldowns"] = {}
-    today["cooldowns"][instrument] = datetime.utcnow().isoformat()
+    now = datetime.now(sg_tz)
+    today["cooldowns"][name] = now.isoformat()
+    log.info(name + " cooldown set for 30 mins")
+
+def in_cooldown(today, name):
+    cd = today.get("cooldowns", {}).get(name)
+    if not cd:
+        return False
+    try:
+        cd_time  = datetime.fromisoformat(cd).replace(tzinfo=sg_tz)
+        elapsed  = (datetime.now(sg_tz) - cd_time).total_seconds() / 60
+        return elapsed < 30
+    except:
+        return False
 
 def run_bot():
-    log.info("OANDA Bot Demo 2 - Mean Reversion starting!")
     settings = load_settings()
-    sg_tz    = pytz.timezone("Asia/Singapore")
     now      = datetime.now(sg_tz)
-    alert    = TelegramAlert()
     hour     = now.hour
+    calendar = CalendarFilter()
+    alert    = TelegramAlert()
 
-    # Session detection - expanded to cover ALL pair sessions
-    # Tokyo: 6am-12pm SGT (AUD/USD, USD/JPY best)
-    # London: 2pm-8pm SGT (EUR, GBP pairs best)
-    # NY: 8pm-11pm SGT (USD pairs best)
-    tokyo_session  = (6 <= hour <= 11)
-    london_session = (14 <= hour <= 19)
-    ny_session     = (20 <= hour <= 23)
-    late_ny        = (0 <= hour <= 1)
-    good_session   = tokyo_session or london_session or ny_session or late_ny
+    log.info("Bot scan at " + now.strftime("%H:%M SGT"))
 
-    if 14 <= hour <= 17:
-        session = "London Open 🇬🇧"
-    elif 20 <= hour <= 23:
-        session = "London+NY Overlap 🔥"
-    elif 18 <= hour <= 19:
-        session = "London Session 🇬🇧"
-    elif 0 <= hour <= 1:
-        session = "NY Late Session 🇺🇸"
-    elif 6 <= hour <= 11:
-        session = "Tokyo Session 🇯🇵"
-    else:
-        session = "Off-hours (SKIP)"
-
-    # Weekend check - silent return, no alert spam (Railway runs 24/7)
-    if now.weekday() == 5:  # Saturday
-        log.info("Saturday - markets closed, skipping silently")
+    # ── WEEKEND CHECK — silent ────────────────────────────────────────
+    if now.weekday() == 5:
+        log.info("Saturday - markets closed, sleeping silently")
         return
-    if now.weekday() == 6 and hour < 5:  # Sunday before 5am SGT
-        log.info("Sunday early - markets not open yet, skipping silently")
+    if now.weekday() == 6 and hour < 5:
+        log.info("Sunday early - sleeping silently")
         return
 
-    # Login
+    # ── CHECK IF ANY PAIR IS IN SESSION ──────────────────────────────
+    active_pairs = [name for name, cfg in ASSETS.items() if is_in_session(hour, cfg)]
+    if not active_pairs:
+        log.info("No active sessions at " + str(hour) + ":00 SGT — sleeping silently")
+        return
+
+    # ── CONNECT TO OANDA ─────────────────────────────────────────────
     trader = OandaTrader(demo=settings["demo_mode"])
     if not trader.login():
-        alert.send("DEMO 2 Login FAILED! Check OANDA_API_KEY and OANDA_ACCOUNT_ID secrets")
+        alert.send("DEMO 2 Login FAILED! Check OANDA_API_KEY and OANDA_ACCOUNT_ID")
         return
 
     current_balance = trader.get_balance()
-    mode            = "DEMO2" if settings["demo_mode"] else "LIVE"
+    mode            = "DEMO2"
 
-    # Load today log
+    # ── LOAD TODAY LOG ───────────────────────────────────────────────
     trade_log = "trades_" + now.strftime("%Y%m%d") + ".json"
     try:
         with open(trade_log) as f:
@@ -307,291 +155,225 @@ def run_bot():
             "trades":        0,
             "start_balance": current_balance,
             "daily_pnl":     0.0,
-            "stopped":       False,
             "wins":          0,
             "losses":        0,
             "consec_losses": 0,
-            "cooldowns":     {}
+            "cooldowns":     {},
+            "open_times":    {},
         }
         with open(trade_log, "w") as f:
             json.dump(today, f, indent=2)
         log.info("New day! Start balance: $" + str(round(current_balance, 2)))
 
-    # PnL tracking
     start_balance = today.get("start_balance", current_balance)
-    open_pnl      = sum(
-        trader.check_pnl(trader.get_position(n))
-        for n in ASSETS if trader.get_position(n)
-    )
-    realized_pnl = current_balance - start_balance
-    total_pnl    = realized_pnl + open_pnl
-    pl_sgd       = realized_pnl * 1.35
-    pnl_emoji    = "✅" if realized_pnl >= 0 else "❌"
 
-    today["daily_pnl"] = realized_pnl
-    with open(trade_log, "w") as f:
-        json.dump(today, f, indent=2)
-
-    # Daily loss limit REMOVED for demo testing
-
-    # Consecutive loss limit REMOVED for demo testing
-    consec = today.get("consec_losses", 0)
-
-    # Max trades limit REMOVED for demo testing
-
-    # Off hours - just monitor
-    if not good_session:
-        open_positions = []
-        for name, config in ASSETS.items():
+    # ── PNL TRACKING ─────────────────────────────────────────────────
+    open_pnl     = 0.0
+    realized_pnl = 0.0
+    try:
+        realized_pnl = round(current_balance - start_balance, 2)
+        for name in ASSETS:
             pos = trader.get_position(name)
             if pos:
-                pnl       = trader.check_pnl(pos)
-                direction = "BUY" if int(float(pos["long"]["units"])) > 0 else "SELL"
-                open_positions.append(config["emoji"] + " " + name + ": " + direction + " $" + str(round(pnl, 2)))
+                open_pnl += trader.check_pnl(pos)
+        open_pnl  = round(open_pnl, 2)
+    except Exception as e:
+        log.warning("PnL error: " + str(e))
 
-        positions_str = "\n".join(open_positions) if open_positions else "No open trades"
-        alert.send(
-            "📊 DEMO 2 Off-hours\n"
-            "Strategy: Mean Reversion\n"
-            "Time: " + now.strftime("%H:%M SGT") + "\n"
-            "Balance: $" + str(round(current_balance, 2)) + "\n"
-            "Realized: $" + str(round(realized_pnl, 2)) + " USD " + pnl_emoji + "\n"
-            "Trading starts: 2pm SGT\n"
-            "---\n" + positions_str
-        )
-        return
+    total_pnl  = round(realized_pnl + open_pnl, 2)
+    pnl_emoji  = "✅" if realized_pnl >= 0 else "🔴"
+    usd_to_sgd = 1.35
+    pl_sgd     = round(realized_pnl * usd_to_sgd, 2)
 
-    # ── END OF DAY HARD CLOSE at 10:55pm SGT ────────────────────────────────
-    # Force close ALL positions before midnight - no overnight trades!
+    # ── EOD HARD CLOSE at 10:55pm SGT ────────────────────────────────
     if hour == 22 and now.minute >= 55:
-        for name, config in ASSETS.items():
+        closed = []
+        for name in ASSETS:
             pos = trader.get_position(name)
             if pos:
-                pnl    = trader.check_pnl(pos)
-                result = trader.close_position(name)
-                if result["success"]:
-                    alert.send(
-                        "🌙 DEMO 2 END-OF-DAY CLOSE\n"
-                        + config["emoji"] + " " + name + "\n"
-                        + "Reason: 10:55pm SGT - no overnight trades!\n"
-                        + "PnL: $" + str(round(pnl, 2)) + " USD\n"
-                        + "= $" + str(round(pnl * 1.35, 2)) + " SGD"
-                    )
-                    log.info("EOD close " + name + " PnL=$" + str(round(pnl, 2)))
+                trader.close_position(name)
+                closed.append(name)
+        if closed:
+            alert.send(
+                "🔔 DEMO 2 EOD Close\n"
+                "Closed: " + ", ".join(closed) + "\n"
+                "Realized: $" + str(realized_pnl) + " USD\n"
+                "= $" + str(pl_sgd) + " SGD"
+            )
         return
 
-    # Active session - scan for mean reversion setups!
-    signals      = SignalEngine()
-    calendar     = EconomicCalendar()
+    # ── CHECK OPEN TRADES — 1HR MAX DURATION ─────────────────────────
+    for name in ASSETS:
+        pos = trader.get_position(name)
+        if not pos:
+            continue
+        try:
+            trade_id = pos.get("id") or pos.get("tradeID")
+            t_url    = trader.base_url + "/v3/accounts/" + trader.account_id + "/trades/" + str(trade_id)
+            t_resp   = requests.get(t_url, headers=trader.headers, timeout=10)
+            open_str = t_resp.json()["trade"]["openTime"]
+            open_utc = datetime.fromisoformat(open_str.replace("Z", "+00:00"))
+            now_utc  = datetime.now(pytz.utc)
+            hours_open = (now_utc - open_utc).total_seconds() / 3600
+            if hours_open >= 1.0:
+                pnl    = trader.check_pnl(pos)
+                emoji  = "✅" if pnl >= 0 else "🔴"
+                trader.close_position(name)
+                alert.send(
+                    "⏰ DEMO 2 1HR LIMIT\n"
+                    + ASSETS[name]["emoji"] + " " + name + "\n"
+                    "Closed after " + str(round(hours_open, 1)) + "h\n"
+                    "PnL: $" + str(round(pnl, 2)) + " " + emoji
+                )
+                log.info(name + " closed — 1hr limit reached")
+        except Exception as e:
+            log.warning("Duration check error " + name + ": " + str(e))
+
+    # ── SCAN ACTIVE PAIRS ────────────────────────────────────────────
     scan_results = []
 
-    # News warning
-    news_summary = calendar.get_today_summary()
-    if "No high" not in news_summary:
-        alert.send("⚠️ DEMO 2 NEWS ALERT!\n" + news_summary)
-
     for name, config in ASSETS.items():
-        if not settings.get(config["setting"], True):
-            continue
-        if today["trades"] >= settings["max_trades_day"]:
-            break
 
-        # Check open position
-        position = trader.get_position(name)
-        if position:
-            pnl       = trader.check_pnl(position)
-            direction = "BUY" if int(float(position["long"]["units"])) > 0 else "SELL"
-            emoji     = "📈" if pnl > 0 else "📉"
-
-            # ── MAX TRADE DURATION CHECK (uses OANDA open time) ──
-            max_hours  = config.get("max_hours", 1)
-            hours_open = 0
-            try:
-                # Fetch trade open time directly from OANDA - works across days!
-                trade_id   = position.get("id") or position.get("tradeID")
-                if trade_id:
-                    t_url  = trader.base_url + "/v3/accounts/" + trader.account_id + "/trades/" + str(trade_id)
-                    t_resp = requests.get(t_url, headers=trader.headers, timeout=10)
-                    if t_resp.status_code == 200:
-                        open_str   = t_resp.json()["trade"]["openTime"]
-                        open_utc   = datetime.fromisoformat(open_str.replace("Z", "+00:00"))
-                        now_utc    = datetime.now(pytz.utc)
-                        hours_open = (now_utc - open_utc).total_seconds() / 3600
-                        log.info(name + " open for " + str(round(hours_open, 2)) + "h / max " + str(max_hours) + "h")
-            except Exception as e:
-                log.warning("Trade age fetch error: " + str(e))
-                # Fallback: use open_times from daily log
-                open_times = today.get("open_times", {})
-                if name in open_times:
-                    try:
-                        open_time  = datetime.fromisoformat(open_times[name])
-                        open_time  = open_time.replace(tzinfo=sg_tz) if open_time.tzinfo is None else open_time
-                        hours_open = (now - open_time).total_seconds() / 3600
-                    except:
-                        hours_open = 0
-
-            if hours_open >= max_hours:
-                close_result = trader.close_position(name)
-                if close_result["success"]:
-                    log.info(name + " FORCE CLOSED after " + str(round(hours_open, 2)) + "h. PnL=$" + str(round(pnl, 2)))
-                    if pnl > 0:
-                        today["wins"] = today.get("wins", 0) + 1
-                    else:
-                        today["losses"]        = today.get("losses", 0) + 1
-                        today["consec_losses"] = today.get("consec_losses", 0) + 1
-                    if "open_times" in today and name in today["open_times"]:
-                        today["open_times"].pop(name, None)
-                    with open(trade_log, "w") as f:
-                        json.dump(today, f, indent=2)
-                    alert.send(
-                        "⏰ DEMO 2 FORCE CLOSE (1hr limit)\n"
-                        + config["emoji"] + " " + name + "\n"
-                        + "Open: " + str(round(hours_open, 2)) + "h (max " + str(max_hours) + "h)\n"
-                        + "Direction: " + direction + "\n"
-                        + "PnL: $" + str(round(pnl, 2)) + " USD\n"
-                        + "= $" + str(round(pnl * 1.35, 2)) + " SGD\n"
-                        + "Closed ✅"
-                    )
-                    scan_results.append(config["emoji"] + " " + name + ": 1HR LIMIT closed " + emoji + " $" + str(round(pnl, 2)))
-                    continue
-
-            scan_results.append(config["emoji"] + " " + name + ": " + direction + " open " + emoji + " $" + str(round(pnl, 2)) + " (" + str(round(hours_open, 2)) + "h/" + str(max_hours) + "h)")
+        # Session check — skip silently if outside hours
+        if not is_in_session(hour, config):
             continue
 
-        # Per-pair session filter - uses session_hours from ASSETS config
-        session_hours = config.get("session_hours", [(14, 23)])
-        pair_ok = any(start <= hour <= end for (start, end) in session_hours)
-        if not pair_ok:
-            hours_str = " & ".join(str(s) + "am-" + str(e) + "pm SGT" for (s, e) in session_hours)
-            scan_results.append(config["emoji"] + " " + name + ": off-session (best " + hours_str + ")")
+        # Already in trade
+        pos = trader.get_position(name)
+        if pos:
+            pnl       = trader.check_pnl(pos)
+            direction = "BUY" if int(float(pos.get("long", {}).get("units", 0))) > 0 else "SELL"
+            strategy  = "MR" if config["strategy"] == "mean_reversion" else "TF"
+            scan_results.append(
+                config["emoji"] + " " + name + " [" + strategy + "]: " +
+                direction + " open 📉 $" + str(round(pnl, 2))
+            )
             continue
 
         # Cooldown check
-        if is_in_cooldown(today, name):
-            scan_results.append(config["emoji"] + " " + name + ": cooldown (30min after SL)")
+        if in_cooldown(today, name):
+            scan_results.append(config["emoji"] + " " + name + ": cooldown (30min)")
             continue
 
         # Spread check
-        spread_ok, spread_val = check_spread(trader, name, settings.get("max_spread_pips", 2), config["pip"])
-        if not spread_ok:
-            scan_results.append(config["emoji"] + " " + name + ": spread too wide - skip")
+        price, bid, ask = trader.get_price(name)
+        if price is None:
+            scan_results.append(config["emoji"] + " " + name + ": price error")
+            continue
+        spread_val = (ask - bid) / config["pip"]
+        if spread_val > settings["max_spread_pips"]:
+            scan_results.append(config["emoji"] + " " + name + ": spread too wide (" + str(round(spread_val, 1)) + " pips)")
             continue
 
-        # News blackout
+        # News check
         news_active, news_reason = calendar.is_news_time(name)
         if news_active:
             scan_results.append(config["emoji"] + " " + name + ": PAUSED - " + news_reason)
             continue
 
-        # Mean reversion signal
+        # ── GET SIGNAL ───────────────────────────────────────────────
         score, direction, details = signals.analyze(asset=config["asset"])
-        log.info(name + ": score=" + str(score) + " dir=" + direction + " | " + details)
+        strategy_label = "MR" if config["strategy"] == "mean_reversion" else "TF"
+        log.info(name + " [" + strategy_label + "]: score=" + str(score) + " dir=" + direction)
 
-        if score < 3 or direction == "NONE":
-            scan_results.append(config["emoji"] + " " + name + ": " + str(score) + "/5 no setup")
+        if score < settings["signal_threshold"] or direction == "NONE":
+            scan_results.append(
+                config["emoji"] + " " + name + " [" + strategy_label + "]: " +
+                str(score) + "/5 no setup"
+            )
             continue
 
-        tp_pips   = config["tp_pips"]
-        stop_pips = config["stop_pips"]
+        # ── PLACE TRADE ──────────────────────────────────────────────
+        tp_pips    = config["tp_pips"]
+        stop_pips  = config["stop_pips"]
+        size       = 10000  # Fixed 0.10 lots
+        max_loss   = round(size * stop_pips * config["pip"], 2)
+        max_profit = round(size * tp_pips   * config["pip"], 2)
 
-        # ── SCALING IN: up to 3 simultaneous trades per pair ─────────
-        # Score 3/5 → T1: 0.05 lots
-        # Score 4/5 → T1 + T2: 0.10 lots
-        # Score 5/5 → T1 + T2 + T3: 0.15 lots
-        tiers = []
-        if score >= 3: tiers.append({"label": "T1", "size": 5000})
-        if score >= 4: tiers.append({"label": "T2", "size": 10000})
-        if score >= 5: tiers.append({"label": "T3", "size": 15000})
+        result = trader.place_order(
+            instrument     = name,
+            direction      = direction,
+            size           = size,
+            stop_distance  = stop_pips,
+            limit_distance = tp_pips
+        )
 
-        if "open_tiers" not in today: today["open_tiers"] = {}
-        if "open_times" not in today: today["open_times"] = {}
-        open_tier_labels = today["open_tiers"].get(name, [])
+        if result["success"]:
+            today["trades"] = today.get("trades", 0) + 1
+            today["consec_losses"] = 0
+            if "open_times" not in today: today["open_times"] = {}
+            today["open_times"][name] = now.isoformat()
+            with open(trade_log, "w") as f:
+                json.dump(today, f, indent=2)
 
-        for tier in tiers:
-            if tier["label"] in open_tier_labels:
-                scan_results.append(config["emoji"] + " " + name + " " + tier["label"] + ": already open")
-                continue
-
-            size       = tier["size"]
-            lots       = str(round(size / 10000, 2))
-            max_loss   = round(size * stop_pips * config["pip"], 2)
-            max_profit = round(size * tp_pips   * config["pip"], 2)
-
-            result = trader.place_order(
-                instrument     = name,
-                direction      = direction,
-                size           = size,
-                stop_distance  = stop_pips,
-                limit_distance = tp_pips
+            price, _, _ = trader.get_price(name)
+            alert.send(
+                "🔄 DEMO 2 NEW TRADE!\n"
+                + config["emoji"] + " " + name + "\n"
+                "Strategy:  " + ("Mean Reversion" if config["strategy"] == "mean_reversion" else "Trend Following") + "\n"
+                "Direction: " + direction + "\n"
+                "Score:     " + str(score) + "/5\n"
+                "Size:      0.10 lots\n"
+                "Entry:     " + str(round(price, config["precision"])) + "\n"
+                "Stop Loss: " + str(stop_pips) + " pips = $" + str(max_loss) + "\n"
+                "Take Prof: " + str(tp_pips) + " pips = $" + str(max_profit) + "\n"
+                "Spread:    " + str(round(spread_val, 1)) + " pips\n"
+                "Signals:   " + details
             )
+            scan_results.append(
+                config["emoji"] + " " + name + " [" + strategy_label + "]: " +
+                direction + " PLACED! " + str(score) + "/5 ✅"
+            )
+        else:
+            set_cooldown(today, name)
+            with open(trade_log, "w") as f:
+                json.dump(today, f, indent=2)
+            scan_results.append(config["emoji"] + " " + name + ": order failed")
 
-            if result["success"]:
-                today["trades"] = today.get("trades", 0) + 1
-                today["consec_losses"] = 0
-                if name not in today["open_tiers"]: today["open_tiers"][name] = []
-                today["open_tiers"][name].append(tier["label"])
-                today["open_times"][name + "_" + tier["label"]] = now.isoformat()
-                with open(trade_log, "w") as f:
-                    json.dump(today, f, indent=2)
-
-                price, _, _ = trader.get_price(name)
-                alert.send(
-                    "🔄 DEMO 2 " + tier["label"] + " TRADE!\n"
-                    + config["emoji"] + " " + name + "\n"
-                    "Direction: " + direction + "\n"
-                    "Score:     " + str(score) + "/5 → " + tier["label"] + "\n"
-                    "Size:      " + lots + " lots\n"
-                    "Entry:     " + str(round(price, config["precision"])) + "\n"
-                    "Stop Loss: " + str(stop_pips) + " pips = $" + str(max_loss) + "\n"
-                    "Take Prof: " + str(tp_pips)   + " pips = $" + str(max_profit) + "\n"
-                    "Spread:    " + str(round(spread_val, 1)) + " pips\n"
-                    "Session:   " + session + "\n"
-                    "Signals:   " + details
-                )
-                scan_results.append(config["emoji"] + " " + name + " " + tier["label"] + ": " + direction + " " + lots + "lots ✅")
-            else:
-                set_cooldown(today, name)
-                with open(trade_log, "w") as f:
-                    json.dump(today, f, indent=2)
-                scan_results.append(config["emoji"] + " " + name + " " + tier["label"] + ": order failed")
-
-    # Summary
-    target_hit = realized_pnl >= 22
-    if target_hit:
+    # ── SCAN SUMMARY ─────────────────────────────────────────────────
+    if realized_pnl >= 15:
         target_msg = "🎯 TARGET HIT! $" + str(round(pl_sgd, 0)) + " SGD today!"
     elif realized_pnl > 0:
-        target_msg = "Profit $" + str(round(pl_sgd, 0)) + " SGD (target $30 SGD)"
+        target_msg = "Profit $" + str(round(pl_sgd, 0)) + " SGD"
     elif realized_pnl < 0:
-        target_msg = "Loss $" + str(abs(round(pl_sgd, 0))) + " SGD today"
+        target_msg = "Loss $" + str(abs(round(pl_sgd, 0))) + " SGD"
     else:
         target_msg = "Waiting for closed trades..."
 
-    summary = "\n".join(scan_results) if scan_results else "No setups this scan"
-    wins    = today.get("wins", 0)
-    losses  = today.get("losses", 0)
-    consec  = today.get("consec_losses", 0)
+    wins   = today.get("wins", 0)
+    losses = today.get("losses", 0)
+    consec = today.get("consec_losses", 0)
+
+    # Session label
+    if 6 <= hour < 11:
+        session = "Asian 🇯🇵"
+    elif 14 <= hour < 19:
+        session = "London 🇬🇧"
+    elif 19 <= hour < 23:
+        session = "NY 🇺🇸"
+    else:
+        session = "Off-hours"
+
+    summary = "\n".join(scan_results) if scan_results else "No active pairs this scan"
 
     alert.send(
-        "🔄 DEMO 2 Scan Complete! " + mode + "\n"
-        "Strategy: Mean Reversion\n"
-        "Time: " + now.strftime("%H:%M SGT") + "\n"
-        "Session: " + session + "\n"
-        "Balance: $" + str(round(current_balance, 2)) + "\n"
-        "Start:   $" + str(round(start_balance, 2)) + "\n"
+        "🔄 DEMO 2 Scan | " + mode + "\n"
+        "Time:     " + now.strftime("%H:%M SGT") + " | " + session + "\n"
+        "Balance:  $" + str(round(current_balance, 2)) + "\n"
         "Realized: $" + str(round(realized_pnl, 2)) + " USD " + pnl_emoji + "\n"
         "= $" + str(round(pl_sgd, 2)) + " SGD\n"
         "Open PnL: $" + str(round(open_pnl, 2)) + " USD\n"
-        "Total:    $" + str(round(total_pnl, 2)) + " USD\n"
         + target_msg + "\n"
-        "Trades: " + str(today["trades"]) + "/" + str(settings["max_trades_day"]) + "\n"
+        "Trades: " + str(today.get("trades", 0)) + "\n"
         "W/L: " + str(wins) + "/" + str(losses) + " | Consec loss: " + str(consec) + "\n"
-        "---\n"
+        "─────────────────────────\n"
         + summary
     )
 
+# ── RAILWAY MAIN LOOP ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import time
-    log.info("🔄 FOREX V2 BOT starting on Railway...")
+    log.info("🚀 DEMO 2 Bot starting on Railway...")
+    log.info("Pairs: AUD/USD (MR Asian) | EUR/GBP (MR London) | EUR/USD (TF London+NY)")
     while True:
         try:
             run_bot()

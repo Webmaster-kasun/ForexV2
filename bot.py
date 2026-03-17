@@ -24,7 +24,7 @@ import pytz
 from signals       import SignalEngine
 from oanda_trader  import OandaTrader
 from telegram_alert import TelegramAlert
-from calendar_filter import CalendarFilter
+from calendar_filter import EconomicCalendar as CalendarFilter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)

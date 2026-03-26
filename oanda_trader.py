@@ -1,12 +1,10 @@
 """
 OANDA Trade Executor
-Stop Loss + Take Profit set automatically on every order!
-OANDA closes trades automatically when SL or TP is hit!
+SL + TP set automatically on every order.
+Added: get_open_trade_id() for reliable 15-min timer.
 """
 
-import os
-import requests
-import logging
+import os, requests, logging
 
 log = logging.getLogger(__name__)
 
@@ -26,10 +24,8 @@ class OandaTrader:
 
     def login(self):
         try:
-            url = f"{self.base_url}/v3/accounts/{self.account_id}"
-            r   = requests.get(url, headers=self.headers, timeout=15)
-            log.info(f"Login status: {r.status_code}")
-            log.info(f"Login response: {r.text[:300]}")
+            r = requests.get(f"{self.base_url}/v3/accounts/{self.account_id}",
+                             headers=self.headers, timeout=15)
             if r.status_code == 200:
                 bal = float(r.json()["account"]["balance"])
                 log.info(f"Login success! Balance: ${bal:.2f}")
@@ -42,7 +38,8 @@ class OandaTrader:
 
     def get_balance(self):
         try:
-            r   = requests.get(f"{self.base_url}/v3/accounts/{self.account_id}", headers=self.headers, timeout=10)
+            r   = requests.get(f"{self.base_url}/v3/accounts/{self.account_id}",
+                               headers=self.headers, timeout=10)
             bal = float(r.json()["account"]["balance"])
             log.info(f"Balance: ${bal:.2f}")
             return bal
@@ -61,8 +58,7 @@ class OandaTrader:
             price = r.json()["prices"][0]
             bid   = float(price["bids"][0]["price"])
             ask   = float(price["asks"][0]["price"])
-            mid   = (bid + ask) / 2
-            return mid, bid, ask
+            return (bid + ask) / 2, bid, ask
         except Exception as e:
             log.error(f"get_price error: {e}")
             return None, None, None
@@ -71,8 +67,7 @@ class OandaTrader:
         try:
             r = requests.get(
                 f"{self.base_url}/v3/accounts/{self.account_id}/positions/{instrument}",
-                headers=self.headers,
-                timeout=10
+                headers=self.headers, timeout=10
             )
             if r.status_code == 200:
                 pos         = r.json()["position"]
@@ -85,6 +80,31 @@ class OandaTrader:
             log.error(f"get_position error: {e}")
             return None
 
+    def get_open_trade_id(self, instrument):
+        """
+        Returns (trade_id, open_time_str) for the first open trade on instrument.
+        Uses /trades endpoint which has proper trade-level data including openTime.
+        Position endpoint does NOT have trade ID at top level — this fixes that.
+        """
+        try:
+            r = requests.get(
+                f"{self.base_url}/v3/accounts/{self.account_id}/trades",
+                headers=self.headers,
+                params={"instrument": instrument, "state": "OPEN"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                trades = r.json().get("trades", [])
+                if trades:
+                    trade    = trades[0]
+                    trade_id = trade.get("id")
+                    open_time= trade.get("openTime","")
+                    return trade_id, open_time
+            return None, None
+        except Exception as e:
+            log.error(f"get_open_trade_id error: {e}")
+            return None, None
+
     def check_pnl(self, position):
         try:
             long_pnl  = float(position["long"].get("unrealizedPL", 0))
@@ -93,82 +113,53 @@ class OandaTrader:
         except:
             return 0
 
-    def place_order(self, instrument, direction, size, stop_distance, limit_distance, currency="USD"):
+    def place_order(self, instrument, direction, size, stop_distance, limit_distance):
         try:
             units = size if direction == "BUY" else -size
 
-            # Get current price for SL/TP calculation
             price, bid, ask = self.get_price(instrument)
             if price is None:
                 return {"success": False, "error": "Cannot get price"}
 
-            # Pip size per instrument
-            if instrument in ["XAU_USD", "XAG_USD"]:
-                pip = 0.01        # Metals: 1 pip = $0.01
-            elif "JPY" in instrument:
-                pip = 0.01        # JPY pairs
-            else:
-                pip = 0.0001      # Forex: 1 pip = 0.0001
+            pip       = 0.01 if ("JPY" in instrument or instrument in ["XAU_USD","XAG_USD"]) else 0.0001
+            precision = 2 if instrument in ["XAU_USD","XAG_USD"] else (3 if "JPY" in instrument else 5)
 
-            # Decimal precision per instrument
-            if instrument in ["XAU_USD", "XAG_USD"]:
-                precision = 2     # Metals: 2 decimals
-            elif "JPY" in instrument:
-                precision = 3     # JPY: 3 decimals
-            else:
-                precision = 5     # Forex: 5 decimals
-
-            # Entry price
-            entry = ask if direction == "BUY" else bid
-
-            # SL and TP prices with correct precision
+            entry    = ask if direction == "BUY" else bid
             if direction == "BUY":
-                sl_price = round(entry - (stop_distance  * pip), precision)
-                tp_price = round(entry + (limit_distance * pip), precision)
+                sl_price = round(entry - stop_distance   * pip, precision)
+                tp_price = round(entry + limit_distance  * pip, precision)
             else:
-                sl_price = round(entry + (stop_distance  * pip), precision)
-                tp_price = round(entry - (limit_distance * pip), precision)
+                sl_price = round(entry + stop_distance   * pip, precision)
+                tp_price = round(entry - limit_distance  * pip, precision)
 
             log.info(f"Placing {direction} {instrument} | units={units} | entry={entry} | SL={sl_price} | TP={tp_price}")
 
-            payload = {
-                "order": {
-                    "type":        "MARKET",
-                    "instrument":  instrument,
-                    "units":       str(units),
-                    "timeInForce": "FOK",
-                    "stopLossOnFill": {
-                        "price":       str(sl_price),
-                        "timeInForce": "GTC"
-                    },
-                    "takeProfitOnFill": {
-                        "price":       str(tp_price),
-                        "timeInForce": "GTC"
-                    }
-                }
-            }
+            payload = {"order": {
+                "type":        "MARKET",
+                "instrument":  instrument,
+                "units":       str(units),
+                "timeInForce": "FOK",
+                "stopLossOnFill":    {"price": str(sl_price), "timeInForce": "GTC"},
+                "takeProfitOnFill":  {"price": str(tp_price), "timeInForce": "GTC"},
+            }}
 
             r    = requests.post(
                 f"{self.base_url}/v3/accounts/{self.account_id}/orders",
-                headers=self.headers,
-                json=payload,
-                timeout=15
+                headers=self.headers, json=payload, timeout=15
             )
             data = r.json()
             log.info(f"Order response: {r.status_code} {str(data)[:300]}")
 
             if r.status_code in [200, 201]:
                 if "orderFillTransaction" in data:
-                    trade_id = data["orderFillTransaction"].get("id", "N/A")
+                    trade_id = data["orderFillTransaction"].get("id","N/A")
                     log.info(f"Trade placed! ID: {trade_id}")
                     return {"success": True, "trade_id": trade_id}
                 elif "orderCancelTransaction" in data:
-                    reason = data["orderCancelTransaction"].get("reason", "Unknown")
-                    return {"success": False, "error": f"Order cancelled: {reason}"}
+                    reason = data["orderCancelTransaction"].get("reason","Unknown")
+                    return {"success": False, "error": f"Cancelled: {reason}"}
                 return {"success": True}
-            else:
-                error = data.get("errorMessage", str(data))
-                return {"success": False, "error": error}
+            return {"success": False, "error": data.get("errorMessage", str(data))}
 
         except Exception as e:
             log.error(f"place_order error: {e}")

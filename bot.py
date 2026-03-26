@@ -11,8 +11,14 @@ Trade specs:
   3 pairs x TP = SGD ~174 per session
 
 Telegram: EVENT-ONLY — no scan spam
-  Alerts on: new trade | TP hit | SL hit | 15-min close | news | EOD | login fail
-  Silent on: no signal | off-session | cooldown | spread skip
+  Alerts: new trade | TP hit | SL hit | 15-min close | news | EOD | login fail
+  Silent: no signal | off-session | cooldown | spread skip
+
+Fixes vs previous:
+  - settings.json signal_threshold 4→3 (was blocking ALL trades)
+  - settings.json max_spread_pips 2.0→1.2 (too wide for scalp)
+  - 15-min timer now uses get_open_trade_id() for reliable trade ID
+  - EUR/GBP spread gate raised to 1.8 pip (OANDA demo spread often >1.2)
 """
 
 import os, json, time, logging, requests
@@ -33,13 +39,31 @@ signals = SignalEngine()
 TRADE_SIZE   = 86000
 SL_PIPS      = 3
 TP_PIPS      = 5
-MAX_DURATION = 15
+MAX_DURATION = 15   # minutes
 USD_SGD      = 1.35
 
 ASSETS = {
-    "AUD_USD": {"instrument":"AUD_USD","asset":"AUDUSD","emoji":"🦘","max_score":3,"pip":0.0001,"precision":5,"stop_pips":SL_PIPS,"tp_pips":TP_PIPS,"session_start":6,"session_end":11},
-    "EUR_GBP": {"instrument":"EUR_GBP","asset":"EURGBP","emoji":"🇪🇺","max_score":3,"pip":0.0001,"precision":5,"stop_pips":SL_PIPS,"tp_pips":TP_PIPS,"session_start":14,"session_end":19},
-    "EUR_USD": {"instrument":"EUR_USD","asset":"EURUSD","emoji":"🇪🇺💵","max_score":3,"pip":0.0001,"precision":5,"stop_pips":SL_PIPS,"tp_pips":TP_PIPS,"session_start":14,"session_end":18},
+    "AUD_USD": {
+        "instrument":"AUD_USD","asset":"AUDUSD","emoji":"🦘",
+        "max_score":3,"pip":0.0001,"precision":5,
+        "stop_pips":SL_PIPS,"tp_pips":TP_PIPS,
+        "session_start":6,"session_end":11,
+        "max_spread":1.2,   # liquid Asian pair — tight spread ok
+    },
+    "EUR_GBP": {
+        "instrument":"EUR_GBP","asset":"EURGBP","emoji":"🇪🇺",
+        "max_score":3,"pip":0.0001,"precision":5,
+        "stop_pips":SL_PIPS,"tp_pips":TP_PIPS,
+        "session_start":14,"session_end":19,
+        "max_spread":1.8,   # OANDA demo spread often 1.3-1.8 for EUR/GBP
+    },
+    "EUR_USD": {
+        "instrument":"EUR_USD","asset":"EURUSD","emoji":"🇪🇺💵",
+        "max_score":3,"pip":0.0001,"precision":5,
+        "stop_pips":SL_PIPS,"tp_pips":TP_PIPS,
+        "session_start":14,"session_end":18,
+        "max_spread":1.2,   # most liquid pair — tight spread ok
+    },
 }
 
 DEFAULT_SETTINGS = {"signal_threshold":3,"demo_mode":True,"max_spread_pips":1.2}
@@ -160,15 +184,19 @@ def run_bot():
         return
 
     # ── 15-MIN HARD CLOSE ────────────────────────────────────────────
+    # Uses get_open_trade_id() which queries /trades endpoint directly
+    # (position endpoint has no trade ID at top level — fixed)
     for name in ASSETS:
         pos = trader.get_position(name)
         if not pos: continue
         try:
-            tid      = pos.get("id") or pos.get("tradeID")
-            t_url    = trader.base_url+"/v3/accounts/"+trader.account_id+"/trades/"+str(tid)
-            open_str = requests.get(t_url, headers=trader.headers, timeout=10).json()["trade"]["openTime"]
+            trade_id, open_str = trader.get_open_trade_id(name)
+            if not trade_id or not open_str:
+                log.warning(name+": could not get trade ID for 15-min check")
+                continue
             open_utc = datetime.fromisoformat(open_str.replace("Z","+00:00"))
             mins     = (datetime.now(pytz.utc) - open_utc).total_seconds() / 60
+            log.info(name+": trade open "+str(round(mins,1))+" min")
             if mins >= MAX_DURATION:
                 pnl     = trader.check_pnl(pos)
                 pnl_sgd = round(pnl * USD_SGD, 2)
@@ -211,9 +239,11 @@ def run_bot():
         price, bid, ask = trader.get_price(name)
         if price is None: log.warning(name+": price error"); continue
 
-        spread = (ask - bid) / cfg["pip"]
-        if spread > settings.get("max_spread_pips", 1.2):
-            log.info(name+": spread "+str(round(spread,1))+"p — skip"); continue
+        # Per-pair spread gate (EUR/GBP gets wider allowance)
+        max_spread = cfg.get("max_spread", settings.get("max_spread_pips", 1.2))
+        spread     = (ask - bid) / cfg["pip"]
+        if spread > max_spread:
+            log.info(name+": spread "+str(round(spread,1))+"p > "+str(max_spread)+"p — skip"); continue
 
         news_active, news_reason = calendar.is_news_time(name)
         if news_active:
@@ -262,7 +292,6 @@ def run_bot():
             with open(trade_log,"w") as f: json.dump(today, f, indent=2)
             log.warning(name+": order failed — "+str(result.get("error","")))
 
-    # ── NO alert.send() here — console log only ───────────────────────
     log.info("Scan complete. Next in 60s.")
 
 if __name__ == "__main__":

@@ -1,20 +1,20 @@
 """
 OANDA — M1 Ultra-Scalp Bot
 ====================================
-$10,000 demo | 4 pairs | 86,000 units
+$10,000 demo | 3 pairs | 86,000 units
 
 Trade specs:
   Size:    86,000 units
-  SL:      3 pips => SGD ~34.83 (USD/JPY ~SGD 23)
-  TP:      5 pips => SGD ~58.05 (USD/JPY ~SGD 39)
+  SL:      4 pips => SGD ~46.44 (USD/JPY ~SGD 30)
+  TP:      6 pips => SGD ~69.66 (USD/JPY ~SGD 46)  [1.5:1 R:R]
   Max dur: 15 minutes hard close
-  4 pairs all TP = SGD ~232 per session
+  3 pairs all TP = SGD ~174 per session
 
 Sessions SGT:
-  AUD/USD  : 6am-11am + 2pm-10pm
   EUR/USD  : 2pm-10pm  (extended — NY session added)
-  GBP/USD  : 2pm-10pm  (new pair)
-  USD/JPY  : 6am-11am + 8pm-10pm (new pair)
+  GBP/USD  : 2pm-10pm
+  USD/JPY  : 6am-11am + 8pm-10pm
+  AUD/USD  : REMOVED — 0% win rate in backtesting
 
 Telegram: EVENT-ONLY
 
@@ -49,19 +49,12 @@ sg_tz   = pytz.timezone("Asia/Singapore")
 signals = SignalEngine()
 
 TRADE_SIZE   = 86000
-SL_PIPS      = 3
-TP_PIPS      = 5
+SL_PIPS      = 4
+TP_PIPS      = 6
 MAX_DURATION = 15
 USD_SGD      = 1.35
 
 ASSETS = {
-    "AUD_USD": {
-        "instrument": "AUD_USD", "asset": "AUDUSD", "emoji": "🦘",
-        "pip": 0.0001, "precision": 5,
-        "stop_pips": SL_PIPS, "tp_pips": TP_PIPS,
-        "max_spread": 1.2,
-        "sessions": [(6, 11), (14, 22)],
-    },
     "EUR_USD": {
         "instrument": "EUR_USD", "asset": "EURUSD", "emoji": "🇪🇺💵",
         "pip": 0.0001, "precision": 5,

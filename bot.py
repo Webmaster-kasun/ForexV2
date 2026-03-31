@@ -5,8 +5,8 @@ $10,000 demo | 3 pairs | 86,000 units
 
 Trade specs:
   Size:    86,000 units
-  SL:      4 pips => SGD ~46.44 (USD/JPY ~SGD 30)
-  TP:      6 pips => SGD ~69.66 (USD/JPY ~SGD 46)  [1.5:1 R:R]
+  SL:      5 pips => SGD ~58.05 (USD/JPY ~SGD 37.5)
+  TP:      7 pips => SGD ~81.27 (USD/JPY ~SGD 52.5)  [1.4:1 R:R]
   Max dur: 15 minutes hard close
   3 pairs all TP = SGD ~174 per session
 
@@ -49,8 +49,8 @@ sg_tz   = pytz.timezone("Asia/Singapore")
 signals = SignalEngine()
 
 TRADE_SIZE   = 86000
-SL_PIPS      = 4
-TP_PIPS      = 6
+SL_PIPS      = 5
+TP_PIPS      = 7
 MAX_DURATION = 15
 USD_SGD      = 1.35
 
@@ -342,7 +342,7 @@ def run_bot(state):
 
 
 if __name__ == "__main__":
-    log.info("🚀 Ultra-Scalp | 4 pairs | SL=3pip TP=5pip | 15min max")
+    log.info("🚀 Ultra-Scalp | 4 pairs | SL=5pip TP=7pip | 15min max")
     local_state = {
         "date": datetime.now(sg_tz).strftime("%Y%m%d"),
         "trades": 0, "start_balance": 0.0,

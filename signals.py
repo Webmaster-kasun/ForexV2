@@ -5,7 +5,7 @@ Supports: EUR/USD, GBP/USD
 Score 4/4 required:
   L0: M15 EMA8 vs EMA21 — direction must match M15 momentum (no counter-trend scalps)
   L1: M5  EMA8 vs EMA21 bias
-  L2: M5  RSI(9) <=30 BUY / >=70 SELL + strong momentum (delta>=1.0) + price vs EMA50
+  L2: M5  RSI(9) <=35 BUY / >=65 SELL + delta>=1.0 + EMA50 + proper candle confirmation
   L3: M1  trigger candle — engulf or pin-bar
   L4: H1  EMA200 hard block — price must be above EMA200 for BUY, below for SELL
        (L4 is a veto/block, not a score point — direction="NONE" if violated)
@@ -108,51 +108,70 @@ class SignalEngine:
             reasons.append("M5 EMA disagrees with M15 — skip")
             return max(bull,bear), "NONE", " | ".join(reasons)
 
-        # ── L2: M5 RSI(9) — tight zones + strong momentum + EMA50 ──
-        # BUY:  RSI(9) <= 30 AND rising strongly (delta >= 1.0 pt)
-        #       AND price above M5 EMA50 (not buying into deep downtrend)
-        #       AND bullish M5 candle (close > open on last bar)
-        # SELL: RSI(9) >= 70 AND falling strongly (delta >= 1.0 pt)
-        #       AND price below M5 EMA50
-        #       AND bearish M5 candle (close < open on last bar)
+        # ── L2: M5 RSI(9) — relaxed zone + momentum + EMA50 + candle ─
+        # BUY:  RSI(9) <= 35 (relaxed — RSI rarely hits 30 in strong uptrends)
+        #       AND rising strongly (delta >= 1.0 pt — confirms momentum turn)
+        #       AND price above M5 EMA50 (pullback in uptrend, not free-fall)
+        #       AND close > open (real bullish body)
+        #       AND close in upper 60% of M5 candle range (buyers in control)
+        # SELL: RSI(9) >= 65, delta <= -1.0, below EMA50, bear body, close in lower 60%
         RSI_MOMENTUM_THRESHOLD = 1.0
 
-        rsi_vals    = self._rsi_series(m5_c, 9)
-        rsi         = rsi_vals[-1]
-        rsi_prev    = rsi_vals[-2] if len(rsi_vals) >= 2 else rsi
-        rsi_delta   = rsi - rsi_prev          # positive = rising, negative = falling
+        rsi_vals  = self._rsi_series(m5_c, 9)
+        rsi       = rsi_vals[-1]
+        rsi_prev  = rsi_vals[-2] if len(rsi_vals) >= 2 else rsi
+        rsi_delta = rsi - rsi_prev
 
-        ema50       = self._ema(m5_c, 50)[-1]
-        price_now   = m5_c[-1]
-        last_open   = m5_c[-2] if len(m5_c) >= 2 else m5_c[-1]  # previous close as proxy
-        # Bullish/bearish confirmation from last completed M5 candle
-        # m5_c[-1] is last complete close, m5_c[-2] is prior close
-        m5_bull_candle = m5_c[-1] > m5_c[-2]
-        m5_bear_candle = m5_c[-1] < m5_c[-2]
+        ema50     = self._ema(m5_c, 50)[-1]
+        price_now = m5_c[-1]
+
+        # Proper candle check requires open/high/low — fetch M5 OHLC
+        m5_co, m5_hi, m5_lo, m5_op = self._fetch_candles(instrument, "M5", 5)
+        if len(m5_co) < 2 or len(m5_hi) < 2 or len(m5_lo) < 2 or len(m5_op) < 2:
+            reasons.append("Not enough M5 OHLC data for candle check")
+            return max(bull,bear), "NONE", " | ".join(reasons)
+
+        c_close = m5_co[-1]; c_open = m5_op[-1]
+        c_high  = m5_hi[-1]; c_low  = m5_lo[-1]
+        c_range = max(c_high - c_low, 0.00001)
+
+        # Bullish: close > open AND close in upper 60% of range
+        bull_candle = (c_close > c_open) and ((c_close - c_low) / c_range >= 0.60)
+        # Bearish: close < open AND close in lower 60% of range
+        bear_candle = (c_close < c_open) and ((c_high - c_close) / c_range >= 0.60)
 
         price_above_ema50 = price_now > ema50
         price_below_ema50 = price_now < ema50
 
         if (bull_bias
-                and rsi <= 30
+                and rsi <= 35
                 and rsi_delta >= RSI_MOMENTUM_THRESHOLD
                 and price_above_ema50
-                and m5_bull_candle):
+                and bull_candle):
             bull += 1
-            reasons.append("✅ RSI="+str(round(rsi,1))+" oversold+Δ"+str(round(rsi_delta,1))+" above EMA50 bull-candle")
+            reasons.append(
+                "✅ RSI="+str(round(rsi,1))
+                +" Δ+"+str(round(rsi_delta,1))
+                +" above EMA50 bull-body close@"+str(round((c_close-c_low)/c_range*100))+"% range"
+            )
         elif (bear_bias
-                and rsi >= 70
+                and rsi >= 65
                 and rsi_delta <= -RSI_MOMENTUM_THRESHOLD
                 and price_below_ema50
-                and m5_bear_candle):
+                and bear_candle):
             bear += 1
-            reasons.append("✅ RSI="+str(round(rsi,1))+" overbought+Δ"+str(round(rsi_delta,1))+" below EMA50 bear-candle")
+            reasons.append(
+                "✅ RSI="+str(round(rsi,1))
+                +" Δ"+str(round(rsi_delta,1))
+                +" below EMA50 bear-body close@"+str(round((c_high-c_close)/c_range*100))+"% range"
+            )
         else:
             reasons.append(
                 "RSI="+str(round(rsi,1))
                 +" Δ="+str(round(rsi_delta,2))
                 +" EMA50="+str(round(ema50,5))
-                +" price="+str(round(price_now,5))
+                +" bull_candle="+str(bull_candle)
+                +" bear_candle="+str(bear_candle)
                 +" — L2 fail"
             )
             return max(bull,bear), "NONE", " | ".join(reasons)

@@ -124,9 +124,28 @@ def cooldown_remaining(state, name):
         return "?"
 
 
+_LOGIN_FAIL_FILE = Path(__file__).parent / ".login_fail_sent"
+
 def _login_fail_key(now):
     slot = now.hour * 2 + (1 if now.minute >= 30 else 0)
-    return "login_fail_" + now.strftime("%Y%m%d") + "_" + str(slot)
+    return now.strftime("%Y%m%d") + "_" + str(slot)
+
+def _login_fail_already_sent(key):
+    """Check file-based dedup — survives container restarts."""
+    try:
+        if _LOGIN_FAIL_FILE.exists():
+            stored = _LOGIN_FAIL_FILE.read_text().strip()
+            if stored == key:
+                return True
+    except:
+        pass
+    return False
+
+def _login_fail_mark_sent(key):
+    try:
+        _LOGIN_FAIL_FILE.write_text(key)
+    except:
+        pass
 
 
 def detect_sl_tp_hits(state, trader, alert):
@@ -198,10 +217,8 @@ def run_bot(state):
     trader = OandaTrader(demo=settings["demo_mode"])
     if not trader.login():
         fail_key = _login_fail_key(now)
-        if not state.get("login_fail_alerted", {}).get(fail_key):
-            if "login_fail_alerted" not in state:
-                state["login_fail_alerted"] = {}
-            state["login_fail_alerted"][fail_key] = True
+        if not _login_fail_already_sent(fail_key):
+            _login_fail_mark_sent(fail_key)
             api_key    = os.environ.get("OANDA_API_KEY", "")
             account_id = os.environ.get("OANDA_ACCOUNT_ID", "")
             alert.send(
@@ -211,7 +228,7 @@ def run_bot(state):
                 "Check Railway logs."
             )
         else:
-            log.warning("Login failed — alert already sent this window")
+            log.warning("Login failed — alert already sent this 30-min window, suppressed")
         return
 
     current_balance = trader.get_balance()

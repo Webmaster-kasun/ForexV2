@@ -1,7 +1,7 @@
 """
 OANDA Trade Executor
 SL + TP set automatically on every order.
-Added: get_open_trade_id() for reliable 15-min timer.
+FIX: login() now returns detailed error reason for debugging.
 """
 
 import os, requests, logging
@@ -13,24 +13,45 @@ class OandaTrader:
         self.api_key    = os.environ.get("OANDA_API_KEY", "")
         self.account_id = os.environ.get("OANDA_ACCOUNT_ID", "")
         self.demo       = demo
-        self.base_url   = "https://api-fxpractice.oanda.com" if demo else "https://api-trade.oanda.com"
+        self.base_url   = "https://api-fxtrade.oanda.com" if not demo else "https://api-fxpractice.oanda.com"
         self.headers    = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type":  "application/json"
         }
         log.info(f"OANDA | Mode: {'DEMO' if demo else 'LIVE'}")
-        log.info(f"Account: {self.account_id}")
-        log.info(f"API Key: {self.api_key[:8]}****")
+        log.info(f"Account: '{self.account_id}'")
+        log.info(f"API Key: '{self.api_key[:8]}****'  (len={len(self.api_key)})")
+        log.info(f"Base URL: {self.base_url}")
 
     def login(self):
+        # Guard: catch missing env vars before making HTTP call
+        if not self.api_key:
+            log.error("Login FAILED: OANDA_API_KEY env var is EMPTY or not set!")
+            return False
+        if not self.account_id:
+            log.error("Login FAILED: OANDA_ACCOUNT_ID env var is EMPTY or not set!")
+            return False
+
         try:
-            r = requests.get(f"{self.base_url}/v3/accounts/{self.account_id}",
-                             headers=self.headers, timeout=15)
+            r = requests.get(
+                f"{self.base_url}/v3/accounts/{self.account_id}",
+                headers=self.headers, timeout=15
+            )
             if r.status_code == 200:
                 bal = float(r.json()["account"]["balance"])
                 log.info(f"Login success! Balance: ${bal:.2f}")
                 return True
-            log.error(f"Login failed: {r.status_code} {r.text}")
+            # Log the exact HTTP error to help diagnose
+            log.error(f"Login FAILED: HTTP {r.status_code} — {r.text[:300]}")
+            if r.status_code == 401:
+                log.error("→ 401 = API key is wrong or expired. Check OANDA_API_KEY in Railway Variables.")
+            elif r.status_code == 403:
+                log.error("→ 403 = Account ID mismatch or key has no access to this account.")
+            elif r.status_code == 404:
+                log.error("→ 404 = Account not found. Check OANDA_ACCOUNT_ID format (e.g. 101-003-XXXXXXX-001).")
+            return False
+        except requests.exceptions.Timeout:
+            log.error("Login FAILED: Request timed out — OANDA API unreachable from Railway.")
             return False
         except Exception as e:
             log.error(f"Login error: {e}")
@@ -81,11 +102,6 @@ class OandaTrader:
             return None
 
     def get_open_trade_id(self, instrument):
-        """
-        Returns (trade_id, open_time_str) for the first open trade on instrument.
-        Uses /trades endpoint which has proper trade-level data including openTime.
-        Position endpoint does NOT have trade ID at top level — this fixes that.
-        """
         try:
             r = requests.get(
                 f"{self.base_url}/v3/accounts/{self.account_id}/trades",
@@ -126,11 +142,11 @@ class OandaTrader:
 
             entry    = ask if direction == "BUY" else bid
             if direction == "BUY":
-                sl_price = round(entry - stop_distance   * pip, precision)
-                tp_price = round(entry + limit_distance  * pip, precision)
+                sl_price = round(entry - stop_distance  * pip, precision)
+                tp_price = round(entry + limit_distance * pip, precision)
             else:
-                sl_price = round(entry + stop_distance   * pip, precision)
-                tp_price = round(entry - limit_distance  * pip, precision)
+                sl_price = round(entry + stop_distance  * pip, precision)
+                tp_price = round(entry - limit_distance * pip, precision)
 
             log.info(f"Placing {direction} {instrument} | units={units} | entry={entry} | SL={sl_price} | TP={tp_price}")
 
@@ -139,8 +155,8 @@ class OandaTrader:
                 "instrument":  instrument,
                 "units":       str(units),
                 "timeInForce": "FOK",
-                "stopLossOnFill":    {"price": str(sl_price), "timeInForce": "GTC"},
-                "takeProfitOnFill":  {"price": str(tp_price), "timeInForce": "GTC"},
+                "stopLossOnFill":   {"price": str(sl_price), "timeInForce": "GTC"},
+                "takeProfitOnFill": {"price": str(tp_price), "timeInForce": "GTC"},
             }}
 
             r    = requests.post(

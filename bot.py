@@ -124,28 +124,13 @@ def cooldown_remaining(state, name):
         return "?"
 
 
-_LOGIN_FAIL_FILE = Path(__file__).parent / ".login_fail_sent"
+# FIX-5: login fail dedup moved to STATE dict — file-based dedup was wiped
+# on every Railway restart causing Telegram spam on each redeploy.
+# STATE survives within a run and resets cleanly on restart (1 alert per restart = correct).
 
 def _login_fail_key(now):
     slot = now.hour * 2 + (1 if now.minute >= 30 else 0)
     return now.strftime("%Y%m%d") + "_" + str(slot)
-
-def _login_fail_already_sent(key):
-    """Check file-based dedup — survives container restarts."""
-    try:
-        if _LOGIN_FAIL_FILE.exists():
-            stored = _LOGIN_FAIL_FILE.read_text().strip()
-            if stored == key:
-                return True
-    except:
-        pass
-    return False
-
-def _login_fail_mark_sent(key):
-    try:
-        _LOGIN_FAIL_FILE.write_text(key)
-    except:
-        pass
 
 
 def detect_sl_tp_hits(state, trader, alert):
@@ -217,8 +202,10 @@ def run_bot(state):
     trader = OandaTrader(demo=settings["demo_mode"])
     if not trader.login():
         fail_key = _login_fail_key(now)
-        if not _login_fail_already_sent(fail_key):
-            _login_fail_mark_sent(fail_key)
+        if not state.get("login_fail_alerted", {}).get(fail_key):
+            if "login_fail_alerted" not in state:
+                state["login_fail_alerted"] = {}
+            state["login_fail_alerted"][fail_key] = True
             api_key    = os.environ.get("OANDA_API_KEY", "")
             account_id = os.environ.get("OANDA_ACCOUNT_ID", "")
             alert.send(
@@ -288,8 +275,9 @@ def run_bot(state):
             log.warning(name + ": price error"); continue
 
         spread = (ask - bid) / cfg["pip"]
-        if spread > session["max_spread"]:
-            log.info(name + ": spread " + str(round(spread, 2)) + "p > " + str(session["max_spread"]) + "p — skip")
+        # FIX-4: add 0.05 buffer — float precision caused "1.5p > 1.5p — skip" in logs
+        if spread > session["max_spread"] + 0.05:
+            log.info(name + ": spread " + str(round(spread, 2)) + "p — skip (max " + str(session["max_spread"]) + "p)")
             continue
 
         # News filter

@@ -193,3 +193,58 @@ class OandaTrader:
         except Exception as e:
             log.error(f"close_position error: {e}")
             return {"success": False}
+
+    def get_candles(self, instrument, granularity, count):
+        """
+        FIX: Added missing get_candles() — bot.py calls this but it never existed.
+        Returns a DataFrame with columns: open, high, low, close, volume
+        Returns None on failure.
+        """
+        import pandas as pd
+        try:
+            r = requests.get(
+                f"{self.base_url}/v3/instruments/{instrument}/candles",
+                headers=self.headers,
+                params={
+                    "granularity": granularity,
+                    "count":       str(count),
+                    "price":       "M",   # midpoint candles
+                },
+                timeout=15
+            )
+            if r.status_code != 200:
+                log.error(f"get_candles {instrument}/{granularity} HTTP {r.status_code}: {r.text[:200]}")
+                return None
+
+            candles = r.json().get("candles", [])
+            if not candles:
+                log.warning(f"get_candles {instrument}/{granularity} — empty response")
+                return None
+
+            rows = []
+            for c in candles:
+                if not c.get("complete", True):
+                    continue
+                m = c["mid"]
+                rows.append({
+                    "time":   c["time"],
+                    "open":   float(m["o"]),
+                    "high":   float(m["h"]),
+                    "low":    float(m["l"]),
+                    "close":  float(m["c"]),
+                    "volume": int(c.get("volume", 0)),
+                })
+
+            if len(rows) < 20:
+                log.warning(f"get_candles {instrument}/{granularity} — only {len(rows)} complete candles")
+                return None
+
+            df = pd.DataFrame(rows)
+            df["time"] = pd.to_datetime(df["time"])
+            df.set_index("time", inplace=True)
+            log.info(f"get_candles {instrument}/{granularity} — {len(df)} candles fetched")
+            return df
+
+        except Exception as e:
+            log.error(f"get_candles error ({instrument}/{granularity}): {e}")
+            return None

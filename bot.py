@@ -6,6 +6,12 @@ SESSIONS:
   15:00–19:00 SGT — NY Overlap
   19:00–23:30 SGT — Late NY
 Max 4 trades/day, 1 per session window.
+
+FIX-06: evaluate() no longer calls in_session() redundantly (run_bot already
+        validated the session; double-check was using config.SESSIONS which
+        could disagree with ASSETS sessions and silently block all trades).
+FIX-07: evaluate() receives and passes active_session directly so spread
+        limit uses the correct per-session max_spread.
 """
 
 import logging
@@ -44,22 +50,12 @@ def is_in_session(hour, asset_cfg):
     return False
 
 
-def in_session():
-    """Returns active session dict or None. Uses SGT timezone."""
-    now  = datetime.now(sg_tz)
-    hour = now.hour
-    for s in config.SESSIONS:
-        if s["start"] <= hour < s["end"]:
-            return s
-    return None
-
-
-def evaluate(df_h1, df_m15, df_m5, spread):
-    session = in_session()
-    if not session:
-        return None, "Outside session"
-
-    if spread > session["max_spread"]:
+def evaluate(df_h1, df_m15, df_m5, spread, active_session):
+    """
+    FIX-06: removed redundant in_session() call. Session already validated by run_bot.
+    FIX-07: uses active_session passed in for spread check.
+    """
+    if spread > active_session["max_spread"]:
         return None, "High spread"
 
     if not signals.check_atr(df_m15):
@@ -71,7 +67,7 @@ def evaluate(df_h1, df_m15, df_m5, spread):
 
     breakout = signals.check_breakout(df_m15)
     if breakout != trend:
-        return None, "No breakout"
+        return None, f"No breakout (breakout={breakout}, trend={trend})"
 
     entry = signals.check_pullback(df_m5, trend)
     if entry != trend:
@@ -88,7 +84,7 @@ def run_bot(state):
     now  = datetime.now(sg_tz)
     hour = now.hour
 
-    # Find active session — note 07:00–08:00 overlaps Asian+London, London takes priority
+    # Find active session — 07:00–08:00 overlaps Asian+London; London takes priority
     active_session = None
     for s in asset_cfg["sessions"]:
         if s["start"] <= hour < s["end"]:
@@ -130,10 +126,6 @@ def run_bot(state):
         spread_pips = round((ask - bid) / 0.0001, 1)
         log.info(f"[{instrument}] Price={mid:.5f}  Spread={spread_pips:.1f}pip  Session={active_session['name']}")
 
-        if spread_pips > active_session["max_spread"]:
-            log.info(f"[{instrument}] Spread {spread_pips} > limit {active_session['max_spread']} — skipping")
-            return
-
         df_h1  = trader.get_candles(instrument, "H1",  120)
         df_m15 = trader.get_candles(instrument, "M15", 80)
         df_m5  = trader.get_candles(instrument, "M5",  60)
@@ -142,7 +134,8 @@ def run_bot(state):
             log.warning(f"[{instrument}] Candle fetch failed")
             return
 
-        direction, reason = evaluate(df_h1, df_m15, df_m5, spread_pips)
+        # FIX-06/07: pass active_session into evaluate()
+        direction, reason = evaluate(df_h1, df_m15, df_m5, spread_pips, active_session)
 
         if direction is None:
             log.info(f"[{instrument}] No signal — {reason}")

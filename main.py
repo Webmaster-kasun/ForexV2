@@ -1,20 +1,20 @@
 """
-Railway Entry Point - OANDA GBP/USD Two-Session Scalp Bot
-==========================================================
-Windows:
-  08:00–12:00 SGT — Early session (Frankfurt pre-London)
-  15:00–17:00 SGT — London open
+main.py — Railway entry point for OANDA GBP/USD scalp bot
 
-FIX LOG:
-  FIX-01: Login FAILED alert suppressed outside session windows
-  FIX-02: Login fail alert deduplicated per 30-min window
-  FIX-03: Startup Telegram sent so you know bot is alive
-  FIX-04: Session open alert sent once per window per day
-  FIX-05: Crash loop protection — 30s sleep on unhandled exception
-  FIX-06: Max 1 trade per window enforced in bot.py
+Sessions (SGT):
+  06:00 – 08:00  Asian Pre-London
+  07:00 – 13:00  London Open
+  15:00 – 19:00  NY Overlap
+  19:00 – 23:00  Late NY
+
+Max 4 trades/day, 1 per session window.
+Polls every 5 minutes.
 """
 
-import os, time, logging, traceback
+import os
+import time
+import logging
+import traceback
 from datetime import datetime
 import pytz
 
@@ -24,7 +24,7 @@ from telegram_alert import TelegramAlert
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 log = logging.getLogger(__name__)
 
@@ -32,27 +32,31 @@ INTERVAL_MINUTES = 5
 sg_tz            = pytz.timezone("Asia/Singapore")
 STATE            = {}
 
-
-def get_today_key():
-    return datetime.now(sg_tz).strftime("%Y%m%d")
+# Session open-alert definitions — must mirror ASSETS sessions in bot.py
+SESSION_ALERTS = [
+    {"start": 6,  "label": "Asian Pre-London", "desc": "06:00–08:00 SGT"},
+    {"start": 7,  "label": "London Open",      "desc": "07:00–13:00 SGT"},
+    {"start": 15, "label": "NY Overlap",       "desc": "15:00–19:00 SGT"},
+    {"start": 19, "label": "Late NY",          "desc": "19:00–23:00 SGT"},
+]
 
 
 def fresh_day_state(today_str, balance):
     return {
-        "date":              today_str,
-        "trades":            0,
-        "start_balance":     balance,
-        "daily_pnl":         0.0,
-        "stopped":           False,
-        "wins":              0,
-        "losses":            0,
-        "consec_losses":     0,
-        "cooldowns":         {},
-        "open_times":        {},
-        "news_alerted":      {},
-        "windows_used":      {},   # tracks which windows traded today
-        "session_alerted":   {},   # tracks which session open alerts sent
-        "login_fail_alerted":{},
+        "date":               today_str,
+        "trades":             0,
+        "start_balance":      balance,
+        "daily_pnl":          0.0,
+        "stopped":            False,
+        "wins":               0,
+        "losses":             0,
+        "consec_losses":      0,
+        "cooldowns":          {},
+        "open_times":         {},
+        "news_alerted":       {},
+        "windows_used":       {},
+        "session_alerted":    {},
+        "login_fail_alerted": {},
     }
 
 
@@ -78,46 +82,41 @@ def check_env_vars():
     return True
 
 
-def is_any_session_now():
-    now  = datetime.now(sg_tz)
-    hour = now.hour
-    return any(is_in_session(hour, cfg) for cfg in ASSETS.values())
-
-
 def check_session_open_alerts(alert):
-    """Send one alert when each window opens for the day."""
+    """Send one Telegram alert at the opening of each session window, once per day."""
     now   = datetime.now(sg_tz)
     hour  = now.hour
     today = now.strftime("%Y%m%d")
 
-    windows = [
-        {"start": 8,  "label": "Early",  "desc": "08:00–12:00 SGT"},
-        {"start": 15, "label": "London", "desc": "15:00–17:00 SGT"},
-    ]
+    session_alerted = STATE.setdefault("session_alerted", {})
 
-    for w in windows:
-        if hour == w["start"]:
-            akey = "session_open_" + today + "_" + w["label"]
-            if not STATE.get("session_alerted", {}).get(akey):
-                if "session_alerted" not in STATE:
-                    STATE["session_alerted"] = {}
-                STATE["session_alerted"][akey] = True
-                balance = STATE.get("start_balance", 0.0)
-                alert.send(
-                    "🔔 " + w["label"] + " Window Open!\n"
-                    "⏰ " + now.strftime("%H:%M SGT") + " (" + w["desc"] + ")\n"
-                    "Balance: $" + str(round(balance, 2)) + "\n"
-                    "Scanning GBP/USD..."
-                )
+    for w in SESSION_ALERTS:
+        if hour != w["start"]:
+            continue
+        akey = f"session_open_{today}_{w['label']}"
+        if session_alerted.get(akey):
+            continue
+
+        session_alerted[akey] = True
+        balance = STATE.get("start_balance", 0.0)
+        alert.send(
+            f"🔔 {w['label']} Window Open!\n"
+            f"⏰ {now.strftime('%H:%M SGT')} ({w['desc']})\n"
+            f"Balance: ${round(balance, 2)}\n"
+            f"Scanning GBP/USD..."
+        )
 
 
 def main():
     global STATE
 
     log.info("=" * 50)
-    log.info("🚀 Railway Bot Started - OANDA GBP/USD Two-Session Scalp")
-    log.info("Window 1: 08:00–12:00 SGT | Window 2: 15:00–17:00 SGT")
-    log.info("GBP/USD | SL=13pip | TP=26pip | Max 1 trade per window")
+    log.info("🚀 GBP/USD Scalp Bot — OANDA / Railway")
+    log.info("Session 1: 06:00–08:00 SGT  Asian Pre-London")
+    log.info("Session 2: 07:00–13:00 SGT  London Open")
+    log.info("Session 3: 15:00–19:00 SGT  NY Overlap")
+    log.info("Session 4: 19:00–23:00 SGT  Late NY")
+    log.info("GBP/USD | SL=13pip | TP=26pip | Max 4 trades/day")
     log.info("=" * 50)
 
     if not check_env_vars():
@@ -130,9 +129,11 @@ def main():
         "🚀 Bot Started!\n"
         "Pair: GBP/USD\n"
         "SL: 13 pip | TP: 26 pip\n"
-        "Window 1: 08:00–12:00 SGT\n"
-        "Window 2: 15:00–17:00 SGT\n"
-        "Max 2 trades/day"
+        "Session 1: 06:00–08:00 SGT (Asian Pre-London)\n"
+        "Session 2: 07:00–13:00 SGT (London Open)\n"
+        "Session 3: 15:00–19:00 SGT (NY Overlap)\n"
+        "Session 4: 19:00–23:00 SGT (Late NY)\n"
+        "Max 4 trades/day | 1 per session"
     )
 
     while True:
@@ -141,19 +142,18 @@ def main():
             today = now.strftime("%Y%m%d")
             log.info("⏰ " + now.strftime("%Y-%m-%d %H:%M SGT"))
 
-            # Day reset
+            # Reset state at start of each new day
             if STATE.get("date") != today:
-                log.info("📅 New day! Fetching balance...")
+                log.info("📅 New day — fetching balance...")
                 try:
                     trader  = OandaTrader(demo=True)
                     balance = trader.get_balance() if trader.login() else 0.0
                 except Exception as e:
                     log.warning("Balance fetch error: " + str(e))
                     balance = 0.0
-                log.info("📅 New day! Balance: $" + str(round(balance, 2)))
+                log.info(f"📅 New day! Balance: ${round(balance, 2)}")
                 STATE = fresh_day_state(today, balance)
 
-            # Session open alerts
             check_session_open_alerts(alert)
 
             run_bot(state=STATE)
@@ -161,9 +161,9 @@ def main():
         except Exception as e:
             log.error("❌ Bot error: " + str(e))
             log.error(traceback.format_exc())
-            time.sleep(30)   # prevent crash loop spam
+            time.sleep(30)   # crash-loop protection
 
-        log.info("💤 Sleeping " + str(INTERVAL_MINUTES) + " mins...")
+        log.info(f"💤 Sleeping {INTERVAL_MINUTES} mins...")
         time.sleep(INTERVAL_MINUTES * 60)
 
 

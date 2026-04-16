@@ -1,5 +1,5 @@
 """
-main.py — Railway entry point for OANDA GBP/USD scalp bot
+main.py — Entry point for GBP/USD scalp bot (Railway + GitHub Actions)
 
 Sessions (SGT):
   06:00 – 08:00  Asian Pre-London
@@ -7,8 +7,10 @@ Sessions (SGT):
   15:00 – 19:00  NY Overlap
   19:00 – 23:00  Late NY
 
-Max 4 trades/day, 1 per session window.
-Polls every 5 minutes.
+FIX-01: GitHub Actions mode — runs once and exits (Actions re-fires every 5 min via cron).
+FIX-02: Railway mode — polls every 5 minutes in a loop (set ENV var RAILWAY=true).
+FIX-03: News filter wired in — pauses 30 min before/after high-impact USD/GBP events.
+FIX-04: pandas added to requirements so candle DataFrames work.
 """
 
 import os
@@ -21,6 +23,7 @@ import pytz
 from bot            import run_bot, ASSETS, is_in_session
 from oanda_trader   import OandaTrader
 from telegram_alert import TelegramAlert
+from calendar_filter import EconomicCalendar
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +35,6 @@ INTERVAL_MINUTES = 5
 sg_tz            = pytz.timezone("Asia/Singapore")
 STATE            = {}
 
-# Session open-alert definitions — must mirror ASSETS sessions in bot.py
 SESSION_ALERTS = [
     {"start": 6,  "label": "Asian Pre-London", "desc": "06:00–08:00 SGT"},
     {"start": 7,  "label": "London Open",      "desc": "07:00–13:00 SGT"},
@@ -40,23 +42,50 @@ SESSION_ALERTS = [
     {"start": 19, "label": "Late NY",          "desc": "19:00–23:00 SGT"},
 ]
 
+# State file path — persists across GitHub Actions runs via artifact OR env var injection
+STATE_FILE = "bot_state.json"
+
+
+def load_state():
+    """Load persisted state from file if it exists."""
+    import json
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f:
+                s = json.load(f)
+                log.info(f"State loaded: {s.get('date')} | trades={s.get('trades',0)}")
+                return s
+    except Exception as e:
+        log.warning(f"State load failed: {e}")
+    return {}
+
+
+def save_state(state):
+    """Persist state so next GitHub Actions run knows trades already taken."""
+    import json
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
+        log.info(f"State saved: {state.get('date')} | trades={state.get('trades',0)}")
+    except Exception as e:
+        log.warning(f"State save failed: {e}")
+
 
 def fresh_day_state(today_str, balance):
     return {
-        "date":               today_str,
-        "trades":             0,
-        "start_balance":      balance,
-        "daily_pnl":          0.0,
-        "stopped":            False,
-        "wins":               0,
-        "losses":             0,
-        "consec_losses":      0,
-        "cooldowns":          {},
-        "open_times":         {},
-        "news_alerted":       {},
-        "windows_used":       {},
-        "session_alerted":    {},
-        "login_fail_alerted": {},
+        "date":            today_str,
+        "trades":          0,
+        "start_balance":   balance,
+        "daily_pnl":       0.0,
+        "stopped":         False,
+        "wins":            0,
+        "losses":          0,
+        "consec_losses":   0,
+        "cooldowns":       {},
+        "open_times":      {},
+        "news_alerted":    {},
+        "windows_used":    {},
+        "session_alerted": {},
     }
 
 
@@ -82,13 +111,12 @@ def check_env_vars():
     return True
 
 
-def check_session_open_alerts(alert):
-    """Send one Telegram alert at the opening of each session window, once per day."""
+def check_session_open_alerts(alert, state):
     now   = datetime.now(sg_tz)
     hour  = now.hour
     today = now.strftime("%Y%m%d")
 
-    session_alerted = STATE.setdefault("session_alerted", {})
+    session_alerted = state.setdefault("session_alerted", {})
 
     for w in SESSION_ALERTS:
         if hour != w["start"]:
@@ -98,7 +126,7 @@ def check_session_open_alerts(alert):
             continue
 
         session_alerted[akey] = True
-        balance = STATE.get("start_balance", 0.0)
+        balance = state.get("start_balance", 0.0)
         alert.send(
             f"🔔 {w['label']} Window Open!\n"
             f"⏰ {now.strftime('%H:%M SGT')} ({w['desc']})\n"
@@ -107,11 +135,50 @@ def check_session_open_alerts(alert):
         )
 
 
+def run_once(state, calendar):
+    """One polling cycle — called by GitHub Actions (run once) or Railway loop."""
+    global STATE
+
+    now   = datetime.now(sg_tz)
+    today = now.strftime("%Y%m%d")
+    log.info("⏰ " + now.strftime("%Y-%m-%d %H:%M SGT"))
+
+    # Reset state at start of each new day
+    if state.get("date") != today:
+        log.info("📅 New day — fetching balance...")
+        try:
+            trader  = OandaTrader(demo=True)
+            balance = trader.get_balance() if trader.login() else 0.0
+        except Exception as e:
+            log.warning("Balance fetch error: " + str(e))
+            balance = 0.0
+        log.info(f"📅 New day! Balance: ${round(balance, 2)}")
+        state = fresh_day_state(today, balance)
+        STATE = state
+
+    alert = TelegramAlert()
+    check_session_open_alerts(alert, state)
+
+    # News filter — skip if blackout window
+    is_news, news_reason = calendar.is_news_time("GBP_USD")
+    if is_news:
+        log.warning(f"📰 NEWS BLACKOUT — skipping: {news_reason}")
+        news_alerted = state.setdefault("news_alerted", {})
+        nkey = f"news_{today}_{news_reason[:40]}"
+        if not news_alerted.get(nkey):
+            news_alerted[nkey] = True
+            alert.send(f"📰 News Blackout!\n{news_reason}\nBot paused 30 min.")
+        return state
+
+    run_bot(state=state)
+    return state
+
+
 def main():
     global STATE
 
     log.info("=" * 50)
-    log.info("🚀 GBP/USD Scalp Bot — OANDA / Railway")
+    log.info("🚀 GBP/USD Scalp Bot — Fixed Build")
     log.info("Session 1: 06:00–08:00 SGT  Asian Pre-London")
     log.info("Session 2: 07:00–13:00 SGT  London Open")
     log.info("Session 3: 15:00–19:00 SGT  NY Overlap")
@@ -120,51 +187,48 @@ def main():
     log.info("=" * 50)
 
     if not check_env_vars():
-        log.error("Missing env vars — sleeping 60s then exiting")
-        time.sleep(60)
+        log.error("Missing env vars — exiting")
         return
 
-    alert = TelegramAlert()
-    alert.send(
-        "🚀 Bot Started!\n"
-        "Pair: GBP/USD\n"
-        "SL: 13 pip | TP: 26 pip\n"
-        "Session 1: 06:00–08:00 SGT (Asian Pre-London)\n"
-        "Session 2: 07:00–13:00 SGT (London Open)\n"
-        "Session 3: 15:00–19:00 SGT (NY Overlap)\n"
-        "Session 4: 19:00–23:00 SGT (Late NY)\n"
-        "Max 4 trades/day | 1 per session"
-    )
+    calendar = EconomicCalendar()
 
-    while True:
+    # Detect run mode:
+    # - RAILWAY=true  → loop forever (Railway worker)
+    # - Default       → run once and exit (GitHub Actions fires every 5 min via cron)
+    is_railway = os.environ.get("RAILWAY", "").lower() in ("true", "1", "yes")
+
+    if is_railway:
+        log.info("🚂 Railway mode — polling loop active")
+        alert = TelegramAlert()
+        alert.send(
+            "🚀 Bot Started (Railway)!\n"
+            "Pair: GBP/USD\n"
+            "SL: 13 pip | TP: 26 pip\n"
+            "Sessions: 06–08 / 07–13 / 15–19 / 19–23 SGT\n"
+            "Max 4 trades/day | News filter ON"
+        )
+        STATE = load_state()
+        while True:
+            try:
+                STATE = run_once(STATE, calendar)
+                save_state(STATE)
+            except Exception as e:
+                log.error("❌ Bot error: " + str(e))
+                log.error(traceback.format_exc())
+                time.sleep(30)
+            log.info(f"💤 Sleeping {INTERVAL_MINUTES} mins...")
+            time.sleep(INTERVAL_MINUTES * 60)
+
+    else:
+        # GitHub Actions mode — single shot
+        log.info("⚡ GitHub Actions mode — single run")
+        STATE = load_state()
         try:
-            now   = datetime.now(sg_tz)
-            today = now.strftime("%Y%m%d")
-            log.info("⏰ " + now.strftime("%Y-%m-%d %H:%M SGT"))
-
-            # Reset state at start of each new day
-            if STATE.get("date") != today:
-                log.info("📅 New day — fetching balance...")
-                try:
-                    trader  = OandaTrader(demo=True)
-                    balance = trader.get_balance() if trader.login() else 0.0
-                except Exception as e:
-                    log.warning("Balance fetch error: " + str(e))
-                    balance = 0.0
-                log.info(f"📅 New day! Balance: ${round(balance, 2)}")
-                STATE = fresh_day_state(today, balance)
-
-            check_session_open_alerts(alert)
-
-            run_bot(state=STATE)
-
+            STATE = run_once(STATE, calendar)
+            save_state(STATE)
         except Exception as e:
             log.error("❌ Bot error: " + str(e))
             log.error(traceback.format_exc())
-            time.sleep(30)   # crash-loop protection
-
-        log.info(f"💤 Sleeping {INTERVAL_MINUTES} mins...")
-        time.sleep(INTERVAL_MINUTES * 60)
 
 
 if __name__ == "__main__":

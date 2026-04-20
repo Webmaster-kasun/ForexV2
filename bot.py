@@ -1,19 +1,13 @@
 """
-bot.py — GBP/USD Triple EMA Momentum Bot (v3)
-==============================================
+bot.py — GBP/USD Triple EMA Momentum Bot (v3.1)
+================================================
 
-STRATEGY (redesigned for 55%+ win rate):
-  Trend:   Triple EMA alignment (EMA5 < EMA10 < EMA20 for SELL)
-  Entry:   London Open 07:00–07:30 SGT+equivalent / London Time
-  TP/SL:   30 pips / 15 pips (2:1 RR)
-  Max:     1 trade per day
+CHANGE v3.1: Removed SGT hardcoded session window.
+All time logic now uses UTC — runs correctly on any server
+(Railway, GitHub Actions, VPS in any region).
 
-BACKTEST RESULTS (Jan–Apr 2026, GBP/USD):
-  Win rate:      81.7%  (old: 35.4%)
-  Profit factor: 8.91   (old: 1.06)
-  Total pips:  +1,305   (old: +49)
-  Trades/week:   4.7
-  Max drawdown:  30 pips
+Entry window: 06:00-08:00 UTC (London Open, both GMT + BST seasons).
+Max 1 trade per day. Resets at 00:00 UTC daily.
 """
 
 import logging
@@ -24,107 +18,93 @@ import config
 from oanda_trader   import OandaTrader
 from telegram_alert import TelegramAlert
 
-log   = logging.getLogger(__name__)
-sg_tz = pytz.timezone('Asia/Singapore')
+log = logging.getLogger(__name__)
+UTC = pytz.utc
 
 ASSETS = {
     'GBP_USD': {
-        'sessions': [
-            # London Open ONLY — 07:00–08:00 London time
-            # In SGT (UTC+8): London is UTC+1 (BST) or UTC+0 (GMT)
-            # London 07:00 = SGT 14:00 (BST) or SGT 15:00 (GMT)
-            {'name': 'London Open', 'start_sg': 14, 'end_sg': 16,
-             'max_spread': 2.5},
-        ],
-        'sl_pips':    15,    # tighter — cut bad trades fast
-        'tp_pips':    30,    # 2:1 RR
-        'max_trades': 1,     # quality over quantity
+        'sl_pips':    15,
+        'tp_pips':    30,
+        'max_trades': 1,
+        'max_spread': 2.5,
     }
 }
-
-
-def _active_session(sg_hour, asset_cfg):
-    for s in asset_cfg['sessions']:
-        if s['start_sg'] <= sg_hour < s['end_sg']:
-            return s
-    return None
-
-
-def evaluate(df_h1, df_m15, spread_pips, session):
-    if spread_pips > session['max_spread']:
-        return None, f"High spread ({spread_pips:.1f} > {session['max_spread']})"
-
-    signal = signals.get_signal(
-        df_h1, df_m15,
-        spread_pips = spread_pips,
-        tp_pips     = ASSETS['GBP_USD']['tp_pips'],
-        sl_pips     = ASSETS['GBP_USD']['sl_pips'],
-    )
-
-    if signal is None:
-        return None, 'No triple EMA alignment or outside London open window'
-
-    return signal['direction'], 'VALID'
 
 
 def run_bot(state):
     instrument = 'GBP_USD'
     asset_cfg  = ASSETS[instrument]
 
-    now  = datetime.now(sg_tz)
-    hour = now.hour
+    now_utc = datetime.now(UTC)
+    utc_hour = now_utc.hour
 
-    session = _active_session(hour, asset_cfg)
-    if not session:
-        log.info(f'[{instrument}] Outside London Open window ({hour:02d}:xx SGT)')
+    # Only scan during London Open window: 06:00-08:00 UTC
+    if not (6 <= utc_hour < 8):
+        log.info(f'[{instrument}] Outside London Open window ({utc_hour:02d}:xx UTC) — skipping')
         return
 
+    # Max 1 trade per day
     if state.get('trades', 0) >= asset_cfg['max_trades']:
-        log.info(f'[{instrument}] 1 trade taken today — done')
+        log.info(f'[{instrument}] 1 trade already taken today — done')
         return
 
-    window_key   = f"{instrument}_{session['name']}"
+    # One trade per window per day
+    window_key   = f"{instrument}_london"
     windows_used = state.setdefault('windows_used', {})
     if windows_used.get(window_key):
-        log.info(f'[{instrument}] London Open window already traded')
+        log.info(f'[{instrument}] London window already traded today')
         return
 
     try:
         trader = OandaTrader(demo=True)
         if not trader.login():
+            log.warning(f'[{instrument}] OANDA login failed')
             return
 
         if trader.get_position(instrument):
-            log.info(f'[{instrument}] Position already open')
+            log.info(f'[{instrument}] Position already open — skipping')
             return
 
         mid, bid, ask = trader.get_price(instrument)
         if mid is None:
+            log.warning(f'[{instrument}] Could not fetch price')
             return
 
         spread_pips = round((ask - bid) / 0.0001, 1)
+        log.info(f'[{instrument}] Price={mid:.5f} Spread={spread_pips}p UTC={utc_hour:02d}:xx')
 
-        # Need 25+ H1 bars for triple EMA, 15+ M15 for ATR
         df_h1  = trader.get_candles(instrument, 'H1',  50)
         df_m15 = trader.get_candles(instrument, 'M15', 30)
 
         if df_h1 is None or df_m15 is None:
+            log.warning(f'[{instrument}] Candle fetch failed')
             return
 
-        direction, reason = evaluate(df_h1, df_m15, spread_pips, session)
+        signal = signals.get_signal(
+            df_h1, df_m15,
+            spread_pips = spread_pips,
+            tp_pips     = asset_cfg['tp_pips'],
+            sl_pips     = asset_cfg['sl_pips'],
+        )
 
-        if direction is None:
-            log.info(f'[{instrument}] No signal — {reason}')
+        if signal is None:
+            log.info(f'[{instrument}] No signal — triple EMA not aligned or outside window')
             return
+
+        direction = signal['direction']
+        sl_pips   = asset_cfg['sl_pips']
+        tp_pips   = asset_cfg['tp_pips']
 
         balance  = trader.get_balance()
-        sl_pips  = asset_cfg['sl_pips']
-        tp_pips  = asset_cfg['tp_pips']
         risk_amt = balance * (config.RISK['risk_per_trade'] / 100)
         size     = max(1000, int((risk_amt / sl_pips) * 10000))
         size     = min(size, 50000)
 
-        log.info(f'[{instrument}] >>> {direction} | SL={sl_pips}p TP={tp_pips}p (2:1) | size={size}')
+        log.info(
+            f'[{instrument}] >>> {direction}'
+            f' | SL={sl_pips}p TP={tp_pips}p (2:1 RR)'
+            f' | size={size}'
+        )
 
         result = trader.place_order(
             instrument     = instrument,
@@ -137,7 +117,7 @@ def run_bot(state):
         if result.get('success'):
             state['trades']          = state.get('trades', 0) + 1
             windows_used[window_key] = True
-            log.info(f'[{instrument}] Trade placed! ID={result.get("trade_id","?")}')
+            log.info(f'[{instrument}] Trade placed! ID={result.get("trade_id", "?")}')
 
             TelegramAlert().send(
                 f'Trade Opened!\n'
@@ -147,7 +127,7 @@ def run_bot(state):
                 f'SL: {sl_pips}p | TP: {tp_pips}p | RR: 2:1\n'
                 f'Size:      {size} units\n'
                 f'Balance:   ${balance:.2f}\n'
-                f'Time:      {now.strftime("%H:%M SGT")}'
+                f'Time:      {now_utc.strftime("%H:%M UTC")}'
             )
         else:
             log.error(f'[{instrument}] Order failed: {result.get("error")}')

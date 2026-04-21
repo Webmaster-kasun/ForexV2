@@ -34,6 +34,7 @@ ASSETS = {
 def run_bot(state):
     instrument = 'GBP_USD'
     asset_cfg  = ASSETS[instrument]
+    alert      = TelegramAlert()
 
     now_utc = datetime.now(UTC)
 
@@ -42,11 +43,11 @@ def run_bot(state):
         log.info(f'[{instrument}] 1 trade already taken today — done')
         return
 
-    # One trade per window per day
+    # One trade per session per day
     window_key   = f"{instrument}_london"
     windows_used = state.setdefault('windows_used', {})
     if windows_used.get(window_key):
-        log.info(f'[{instrument}] London window already traded today')
+        log.info(f'[{instrument}] Window already traded today')
         return
 
     try:
@@ -65,7 +66,7 @@ def run_bot(state):
             return
 
         spread_pips = round((ask - bid) / 0.0001, 1)
-        log.info(f'[{instrument}] Price={mid:.5f} Spread={spread_pips}p UTC={utc_hour:02d}:xx')
+        log.info(f'[{instrument}] Price={mid:.5f} Spread={spread_pips}p')
 
         df_h1  = trader.get_candles(instrument, 'H1',  50)
         df_m15 = trader.get_candles(instrument, 'M15', 30)
@@ -73,6 +74,12 @@ def run_bot(state):
         if df_h1 is None or df_m15 is None:
             log.warning(f'[{instrument}] Candle fetch failed')
             return
+
+        # Compute EMAs for alert
+        c     = df_h1['close']
+        ema5  = round(c.ewm(span=5,  adjust=False).mean().iloc[-1], 5)
+        ema10 = round(c.ewm(span=10, adjust=False).mean().iloc[-1], 5)
+        ema20 = round(c.ewm(span=20, adjust=False).mean().iloc[-1], 5)
 
         signal = signals.get_signal(
             df_h1, df_m15,
@@ -82,12 +89,20 @@ def run_bot(state):
         )
 
         if signal is None:
-            log.info(f'[{instrument}] No signal — triple EMA not aligned or outside window')
+            reason = 'Triple EMA not aligned — no clear trend'
+            log.info(f'[{instrument}] No signal — {reason}')
+            # Send scan result to Telegram every run so you can see bot is alive
+            alert.send_scan_result(mid, spread_pips, ema5, ema10, ema20,
+                                   signal=None, reason=reason)
             return
 
         direction = signal['direction']
         sl_pips   = asset_cfg['sl_pips']
         tp_pips   = asset_cfg['tp_pips']
+
+        # Send scan result with signal
+        alert.send_scan_result(mid, spread_pips, ema5, ema10, ema20,
+                               signal=direction, reason='')
 
         balance  = trader.get_balance()
         risk_amt = balance * (config.RISK['risk_per_trade'] / 100)
@@ -96,8 +111,7 @@ def run_bot(state):
 
         log.info(
             f'[{instrument}] >>> {direction}'
-            f' | SL={sl_pips}p TP={tp_pips}p (2:1 RR)'
-            f' | size={size}'
+            f' | SL={sl_pips}p TP={tp_pips}p (2:1 RR) | size={size}'
         )
 
         result = trader.place_order(
@@ -113,18 +127,19 @@ def run_bot(state):
             windows_used[window_key] = True
             log.info(f'[{instrument}] Trade placed! ID={result.get("trade_id", "?")}')
 
-            TelegramAlert().send(
-                f'Trade Opened!\n'
-                f'Pair:      GBP/USD\n'
-                f'Direction: {direction}\n'
-                f'Strategy:  Triple EMA Momentum\n'
-                f'SL: {sl_pips}p | TP: {tp_pips}p | RR: 2:1\n'
-                f'Size:      {size} units\n'
-                f'Balance:   ${balance:.2f}\n'
-                f'Time:      {now_utc.strftime("%H:%M UTC")}'
+            alert.send_trade_open(
+                direction   = direction,
+                entry       = signal['entry_price'],
+                sl          = signal['stop_loss'],
+                tp          = signal['take_profit'],
+                sl_pips     = sl_pips,
+                tp_pips     = tp_pips,
+                size        = size,
+                balance_usd = balance,
             )
         else:
             log.error(f'[{instrument}] Order failed: {result.get("error")}')
+            alert.send(f'❌ <b>Order Failed</b>\nGBP/USD {direction}\nError: {result.get("error")}')
 
     except Exception as e:
         log.error(f'[{instrument}] run_bot error: {e}', exc_info=True)

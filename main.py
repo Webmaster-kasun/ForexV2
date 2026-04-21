@@ -87,11 +87,13 @@ def run_once(state: dict, calendar: EconomicCalendar) -> dict:
     global STATE
 
     now_utc = datetime.now(UTC)
-    today   = now_utc.strftime('%Y-%m-%d')   # UTC date as day key
+    today   = now_utc.strftime('%Y-%m-%d')
 
     log.info(f'UTC: {now_utc.strftime("%Y-%m-%d %H:%M")}')
 
-    # Reset state at UTC midnight
+    alert = TelegramAlert()
+
+    # Reset state at UTC midnight — send new day alert
     if state.get('date') != today:
         log.info('New UTC day — resetting state...')
         try:
@@ -103,6 +105,7 @@ def run_once(state: dict, calendar: EconomicCalendar) -> dict:
         state = fresh_day_state(today, balance)
         STATE = state
         log.info(f'New day: {today} | Balance: ${balance:.2f}')
+        alert.send_new_day(balance, today)
 
     # News blackout filter
     is_news, news_reason = calendar.is_news_time('GBP_USD')
@@ -112,7 +115,7 @@ def run_once(state: dict, calendar: EconomicCalendar) -> dict:
         nkey = f"news_{today}_{news_reason[:40]}"
         if not news_alerted.get(nkey):
             news_alerted[nkey] = True
-            TelegramAlert().send(f'News Blackout!\n{news_reason}\nBot paused 30 min.')
+            alert.send_news_blackout(news_reason)
         return state
 
     run_bot(state=state)
@@ -138,14 +141,13 @@ def main():
 
     if is_railway:
         log.info('Railway mode — polling every 5 minutes')
-        TelegramAlert().send(
-            'Bot Started (Railway) v3.1!\n'
-            'Pair: GBP/USD\n'
-            'SL: 15p | TP: 30p | RR: 2:1\n'
-            'Entry: 06:00-08:00 UTC (London Open)\n'
-            'Max 1 trade/day | Triple EMA filter\n'
-            'Running 24/7 UTC'
-        )
+        try:
+            trader  = OandaTrader(demo=True)
+            balance = trader.get_balance() if trader.login() else 0.0
+        except Exception:
+            balance = 0.0
+        now_utc = datetime.now(UTC)
+        TelegramAlert().send_startup(balance, now_utc.strftime('%Y-%m-%d'))
         STATE = load_state()
         while True:
             try:

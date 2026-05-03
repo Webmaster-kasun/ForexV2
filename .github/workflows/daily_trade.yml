@@ -1,21 +1,10 @@
-name: Multi-Pair Bot — GBP/USD EUR/USD AUD/USD
+name: GBP/USD Triple EMA Momentum Bot — Demo
 
 on:
   schedule:
-    # AUD/USD Asia session: 07:00-10:00 SGT = 23:00-02:00 UTC
-    - cron: "*/5 23 * * 0-4"    # Sun-Thu 23:xx UTC (Mon-Fri 07:xx SGT)
-    - cron: "*/5 0-1 * * 1-5"   # Mon-Fri 00:xx-01:xx UTC (08:xx-09:xx SGT)
-
-    # London session: 15:00-19:00 SGT = 07:00-11:00 UTC
-    - cron: "*/5 7-10 * * 1-5"  # Mon-Fri 07:xx-10:xx UTC (15:xx-18:xx SGT)
-
-    # NY session: 20:00-00:00 SGT = 12:00-16:00 UTC
-    - cron: "*/5 12-15 * * 1-5" # Mon-Fri 12:xx-15:xx UTC (20:xx-23:xx SGT)
-
-    # Daily state reset at SGT midnight = 16:00 UTC
-    - cron: "0 16 * * 1-5"      # Mon-Fri 16:00 UTC = 00:00 SGT
-
-  workflow_dispatch:             # Manual trigger anytime
+    - cron: "*/5 * * * 1-5"   # every 5 min, Mon-Fri, all day
+    - cron: "0 0 * * 1-5"     # daily state reset at 00:00 UTC
+  workflow_dispatch:           # manual trigger anytime
 
 jobs:
   trade:
@@ -37,9 +26,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bot_state.json
-          key: multipair-state-${{ github.run_number }}
+          key: bot-state-${{ github.run_number }}
           restore-keys: |
-            multipair-state-
+            bot-state-
 
       - name: Run bot
         env:
@@ -53,7 +42,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: multipair-logs-${{ github.run_number }}
+          name: bot-logs-${{ github.run_number }}
           path: |
             *.log
             bot_state.json

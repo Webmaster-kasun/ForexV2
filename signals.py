@@ -114,10 +114,12 @@ def _atr(highs, lows, closes, period=14):
 
 def triple_ema_signal(instrument: str, max_gap_pips: float = 50.0) -> tuple:
     """Returns (direction, reason). direction: 'BUY' | 'SELL' | None"""
-    PIP = 0.0001
+    PIP    = 0.0001
+    spans  = TRIPLE_EMA["spans"]          # configurable — default [3,7,14]
+    min_atr= TRIPLE_EMA["min_atr_pips"]   # configurable — default 3.0
 
     h1_c, h1_h, h1_l, h1_o = _fetch(instrument, "H1", 50)
-    if len(h1_c) < 25:
+    if len(h1_c) < max(spans) + 5:
         return None, "Not enough H1 data"
 
     # Gap filter
@@ -126,24 +128,25 @@ def triple_ema_signal(instrument: str, max_gap_pips: float = 50.0) -> tuple:
         if gap > max_gap_pips:
             return None, f"Gap filter — {gap:.0f}p gap > {max_gap_pips:.0f}p (news/Monday gap)"
 
-    ema5  = _ema(h1_c, 5)[-1]
-    ema10 = _ema(h1_c, 10)[-1]
-    ema20 = _ema(h1_c, 20)[-1]
+    ema_a = _ema(h1_c, spans[0])[-1]
+    ema_b = _ema(h1_c, spans[1])[-1]
+    ema_c = _ema(h1_c, spans[2])[-1]
 
-    if ema5 < ema10 < ema20:   direction = "SELL"
-    elif ema5 > ema10 > ema20: direction = "BUY"
-    else: return None, f"EMAs mixed (EMA5={ema5:.5f} EMA10={ema10:.5f} EMA20={ema20:.5f})"
+    if ema_a < ema_b < ema_c:   direction = "SELL"
+    elif ema_a > ema_b > ema_c: direction = "BUY"
+    else: return None, f"EMAs mixed (EMA{spans[0]}={ema_a:.5f} EMA{spans[1]}={ema_b:.5f} EMA{spans[2]}={ema_c:.5f})"
 
     m15_c, m15_h, m15_l, _ = _fetch(instrument, "M15", 30)
     if len(m15_c) < 15:
         return None, "Not enough M15 data"
 
     atr_p = _atr(m15_h, m15_l, m15_c, 14) / PIP
-    if atr_p < TRIPLE_EMA["min_atr_pips"]:
-        return None, f"ATR too low ({atr_p:.1f}p)"
+    if atr_p < min_atr:
+        return None, f"ATR too low ({atr_p:.1f}p < {min_atr}p)"
 
-    return direction, (f"Triple EMA {direction} | EMA5={ema5:.5f} "
-                       f"EMA10={ema10:.5f} EMA20={ema20:.5f} | ATR={atr_p:.1f}p")
+    return direction, (f"Triple EMA {direction} | "
+                       f"EMA{spans[0]}={ema_a:.5f} EMA{spans[1]}={ema_b:.5f} "
+                       f"EMA{spans[2]}={ema_c:.5f} | ATR={atr_p:.1f}p")
 
 
 # ── Strategy 2: FOUR-LAYER ENGINE (EUR/USD) ───────────────────────────────────
@@ -293,6 +296,7 @@ def audusd_signal(instrument: str, state: dict) -> tuple:
     now_sg = datetime.now(sg_tz)
     sg_h   = now_sg.hour + now_sg.minute/60
 
+    # Entry window from config (default 13:00-17:00 SGT)
     if not (cfg["breakout_start_sgt"] <= sg_h < cfg["breakout_end_sgt"]):
         return None, f"Outside breakout window ({sg_h:.1f}h SGT)", {}
 
@@ -300,7 +304,7 @@ def audusd_signal(instrument: str, state: dict) -> tuple:
     h4_c, _, _, _ = _fetch(instrument, "H4", 60)
     if len(h4_c) < 51:
         return None, "Not enough H4 data", {}
-    h4_trend = "BUY" if h4_c[-1] > _ema(h4_c,50)[-1] else "SELL"
+    h4_trend = "BUY" if h4_c[-1] > _ema(h4_c, 50)[-1] else "SELL"
 
     # ATR
     m15_c, m15_h, m15_l, _ = _fetch(instrument, "M15", 100)
@@ -310,55 +314,82 @@ def audusd_signal(instrument: str, state: dict) -> tuple:
     if atr_p < cfg["min_atr_pips"]:
         return None, f"ATR {atr_p:.1f}p < {cfg['min_atr_pips']}p", {}
 
-    # Asian range
+    # Asian range — built from Asian session bars
     asian_key  = f"AUD_USD_asian_{now_sg.strftime('%Y%m%d')}"
     asian_data = state.get(asian_key)
 
     if asian_data is None:
-        bars = _fetch_timed(instrument, "M15", 80)
+        bars = _fetch_timed(instrument, "M15", 100)
         highs, lows = [], []
         for ts, bh, bl, bc, bo in bars:
             sg = ts.astimezone(sg_tz)
-            if sg.strftime("%Y%m%d")==now_sg.strftime("%Y%m%d") and 8<=sg.hour+sg.minute/60<13:
+            bh_sgt = sg.hour + sg.minute / 60
+            if (sg.strftime("%Y%m%d") == now_sg.strftime("%Y%m%d") and
+                    cfg["asian_start_sgt"] <= bh_sgt < cfg["asian_end_sgt"]):
                 highs.append(bh); lows.append(bl)
-        if len(highs) < 8:
-            return None, "Asian range building (need 8+ M15 bars 08:00-13:00 SGT)", {}
+        if len(highs) < 4:   # was 8 — lowered to 4 bars (1 hour)
+            return None, f"Asian range building ({len(highs)} bars so far)", {}
         ah = max(highs); al = min(lows)
-        ar = (ah-al)/PIP
-        state[asian_key] = {"high":ah,"low":al,"range":ar}
+        ar = (ah - al) / PIP
+        state[asian_key] = {"high": ah, "low": al, "range": ar}
         asian_data = state[asian_key]
 
-    ah = asian_data["high"]; al = asian_data["low"]; ar = asian_data["range"]
+    ah = asian_data["high"]
+    al = asian_data["low"]
+    ar = asian_data["range"]
 
     if ar >= cfg["max_asian_range_pips"]:
         return None, f"Asian range {ar:.1f}p >= {cfg['max_asian_range_pips']}p — too wide", {}
 
-    # Sweep detection
+    # Sweep detection — scan all bars after Asian session
     swept_low = swept_high = False
     sd_low = sd_high = 0.0
-    bars = _fetch_timed(instrument, "M15", 50)
+    bars = _fetch_timed(instrument, "M15", 60)
     for ts, bh, bl, bc, bo in bars:
         sg = ts.astimezone(sg_tz)
-        if sg.strftime("%Y%m%d")==now_sg.strftime("%Y%m%d") and sg.hour+sg.minute/60>=13:
-            if bl < al: swept_low  = True; sd_low  = max(sd_low,  (al-bl)/PIP)
-            if bh > ah: swept_high = True; sd_high = max(sd_high, (bh-ah)/PIP)
+        bh_sgt = sg.hour + sg.minute / 60
+        if (sg.strftime("%Y%m%d") == now_sg.strftime("%Y%m%d") and
+                bh_sgt >= cfg["asian_end_sgt"]):
+            if bl < al:
+                swept_low  = True
+                sd_low     = max(sd_low, (al - bl) / PIP)
+            if bh > ah:
+                swept_high = True
+                sd_high    = max(sd_high, (bh - ah) / PIP)
 
     cur = m15_c[-1]
-    direction = None
+    direction  = None
     sweep_info = ""
 
-    if swept_low and sd_low>=cfg["min_sweep_pips"] and cur>ah:
-        if h4_trend=="BUY": direction="BUY"; sweep_info=f"Swept low {sd_low:.1f}p"
-        else: return None, f"BUY blocked — H4={h4_trend}", {}
-    elif swept_high and sd_high>=cfg["min_sweep_pips"] and cur<al:
-        if h4_trend=="SELL": direction="SELL"; sweep_info=f"Swept high {sd_high:.1f}p"
-        else: return None, f"SELL blocked — H4={h4_trend}", {}
-    else:
-        status = f"Low swept {sd_low:.1f}p" if swept_low else ("High swept {sd_high:.1f}p" if swept_high else "No sweep yet")
-        return None, f"No breakout after sweep — {status}", {
-            "Asian Range":f"✅ {ar:.1f}p","Sweep":f"⏳ {status}"}
+    if swept_low and sd_low >= cfg["min_sweep_pips"] and cur > ah:
+        if h4_trend == "BUY":
+            direction = "BUY"; sweep_info = f"Swept low {sd_low:.1f}p → broke above AH"
+        else:
+            return None, f"BUY blocked — H4={h4_trend}", {}
 
-    return direction, (f"AUD/USD Asian Range {direction} | AR={ar:.1f}p | {sweep_info} | H4={h4_trend}"), {
-        "Trend":f"✅ H4 {h4_trend}", "ATR":f"✅ {atr_p:.1f}p",
-        "Asian Range":f"✅ {ar:.1f}p", "Sweep":f"✅ {sweep_info}",
-        "Breakout":f"✅ {direction}"}
+    elif swept_high and sd_high >= cfg["min_sweep_pips"] and cur < al:
+        if h4_trend == "SELL":
+            direction = "SELL"; sweep_info = f"Swept high {sd_high:.1f}p → broke below AL"
+        else:
+            return None, f"SELL blocked — H4={h4_trend}", {}
+
+    else:
+        # No confirmed breakout yet — report current sweep status
+        parts = []
+        if swept_low:  parts.append(f"Low swept {sd_low:.1f}p")
+        if swept_high: parts.append(f"High swept {sd_high:.1f}p")
+        status = " | ".join(parts) if parts else "No sweep yet"
+        return None, f"Waiting for breakout — {status}", {
+            "Asian Range": f"✅ {ar:.1f}p  AH={ah:.5f}  AL={al:.5f}",
+            "Sweep":       f"⏳ {status}",
+        }
+
+    return direction, (
+        f"AUD/USD Asian Range {direction} | AR={ar:.1f}p | {sweep_info} | H4={h4_trend}"
+    ), {
+        "Trend":        f"✅ H4 {h4_trend}",
+        "ATR":          f"✅ {atr_p:.1f}p",
+        "Asian Range":  f"✅ {ar:.1f}p",
+        "Sweep":        f"✅ {sweep_info}",
+        "Breakout":     f"✅ {direction}",
+    }

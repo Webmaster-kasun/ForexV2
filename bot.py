@@ -1,10 +1,10 @@
-"""Main orchestrator for Cable Scalp v1.0 — EUR/USD M5 Scalper
+"""Main orchestrator for Cable Scalp v2.0 — GBP/USD M5 Scalper
 
-Dedicated EUR/USD (Fiber) scalping bot. Single pair, clean data, focused strategy.
-Tokyo session primary. Dynamic JPY pip value calculation each cycle.
+Dedicated GBP/USD (Cable) scalping bot. EMA13/34 + ORB30 + CPR (distance-gated).
+GBP/USD-specific: slower EMAs, wider ORB formation, stricter threshold (5/6).
 
-Active sessions: London 16–20 SGT (≥4/6) PRIMARY, US 21–23 SGT (≥4/6), US cont 00–03 SGT (≥4/6)
-Disabled: Tokyo 08–15 SGT (EUR/USD barely moves in Asian hours)
+Active sessions: Tokyo 08–14 SGT (≥5/6), London 15–20 SGT (≥5/6) PRIMARY, US 20–23 SGT (≥5/6)
+Dead zone: 04:00–07:59 SGT — no new entries.
 
 All configuration lives in settings.json under the top-level "pairs" key.
 Per-pair values override global defaults.
@@ -71,19 +71,19 @@ def _build_sessions(settings: dict) -> list:
     US windows excluded when us_session_start_hour >= 99 (disabled sentinel).
     Tuple format: (name, macro, start_hour, end_hour, fallback_threshold).
     """
-    lon_s  = int(settings.get("london_session_start_hour",    16))
+    lon_s  = int(settings.get("london_session_start_hour",    15))   # GBP: was 16
     lon_e  = int(settings.get("london_session_end_hour",      20))
-    us_s   = int(settings.get("us_session_start_hour",        99))
+    us_s   = int(settings.get("us_session_start_hour",        20))   # GBP: was 99
     us_e   = int(settings.get("us_session_end_hour",          23))
-    us_e2  = int(settings.get("us_session_early_end_hour",    99))
+    us_e2  = int(settings.get("us_session_early_end_hour",    99))   # GBP: disabled
     tok_s  = int(settings.get("tokyo_session_start_hour",      8))
-    tok_e  = int(settings.get("tokyo_session_end_hour",       15))
+    tok_e  = int(settings.get("tokyo_session_end_hour",       14))   # GBP: was 15
     sessions = [
-        ("Tokyo Window",  "Tokyo",  tok_s, tok_e, 5),
-        ("London Window", "London", lon_s, lon_e, 4),
+        ("Tokyo Window",  "Tokyo",  tok_s, tok_e, 5),   # GBP: threshold 5
+        ("London Window", "London", lon_s, lon_e, 5),   # GBP: was 4
     ]
-    if us_s < 99:   sessions.append(("US Window", "US", us_s,  us_e,  4))
-    if us_e2 < 99:  sessions.append(("US Window", "US", 0,     us_e2, 3))
+    if us_s < 99:   sessions.append(("US Window", "US", us_s,  us_e,  5))   # GBP: was 4
+    if us_e2 < 99:  sessions.append(("US Window", "US", 0,     us_e2, 5))   # GBP: was 3
     return sessions
 
 
@@ -199,11 +199,11 @@ def validate_settings(settings: dict) -> dict:
     if missing:
         raise ValueError(f"Missing required settings keys: {missing}")
 
-    settings.setdefault("signal_threshold",           4)
+    settings.setdefault("signal_threshold",           5)    # GBP/USD: 5/6 required (was 4 for EUR)
     # v2.0 score-based risk sizing. Legacy fields kept as fallback.
-    settings.setdefault("position_full_usd",          40)  # fallback for score 5
-    settings.setdefault("position_partial_usd",       30)  # fallback for score 4
-    settings.setdefault("score_risk_usd",             {"4": 30, "5": 40, "6": 50})
+    settings.setdefault("position_full_usd",          40)  # fallback for score 6
+    settings.setdefault("position_partial_usd",       30)  # fallback for score 5
+    settings.setdefault("score_risk_usd",             {"5": 30, "6": 40})  # GBP: no score-4 trade
     settings.setdefault("max_units",                  20000)
     settings.setdefault("account_balance_override",   0)
     settings.setdefault("enabled",                    True)
@@ -212,33 +212,33 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("be_trigger_pips",             20)
     settings.setdefault("trading_day_start_hour_sgt", 8)
     settings.setdefault("max_losing_trades_session",  4)
-    settings.setdefault("exhaustion_atr_mult",        3.0)
+    settings.setdefault("exhaustion_atr_mult",        2.5)  # GBP/USD: was 3.0 (EUR)
     settings.setdefault("margin_safety_factor",       0.6)
     settings.setdefault("margin_retry_safety_factor", 0.4)
     settings.setdefault("margin_rate_override",       0.0)
     settings.setdefault("auto_scale_on_margin_reject",True)
     settings.setdefault("telegram_show_margin",       True)
     # Suppress WATCHING alerts for signals below this score (0 = send all)
-    settings.setdefault("telegram_min_score_alert",   4)
+    settings.setdefault("telegram_min_score_alert",   5)    # GBP: only show score≥5 alerts
     settings.setdefault("friday_cutoff_hour_sgt",     23)
     settings.setdefault("friday_cutoff_minute_sgt",   0)
     settings.setdefault("news_lookahead_min",         120)
     settings.setdefault("news_medium_penalty_score",  -1)
     settings.setdefault("loss_streak_cooldown_min",   30)
-    settings.setdefault("orb_fresh_minutes",          60)
-    settings.setdefault("orb_aging_minutes",          120)
+    settings.setdefault("orb_fresh_minutes",          45)   # GBP/USD: was 60 (EUR)
+    settings.setdefault("orb_aging_minutes",          90)   # GBP/USD: was 120 (EUR)
     settings.setdefault("min_rr_ratio",               1.6)
     settings.setdefault("h1_filter_enabled",        True)
     settings.setdefault("h1_filter_mode",           "score_aware")
     settings.setdefault("h1_ema_period",            21)
     settings.setdefault("rr_ratio",                   1.67)  # fallback only — pair_sl_tp always used
-    settings.setdefault("ema_fast_period",            9)
-    settings.setdefault("ema_slow_period",            21)
-    settings.setdefault("orb_formation_minutes",      15)
+    settings.setdefault("ema_fast_period",            13)   # GBP/USD: was 9 (EUR)
+    settings.setdefault("ema_slow_period",            34)   # GBP/USD: was 21 (EUR)
+    settings.setdefault("orb_formation_minutes",      30)   # GBP/USD: was 15 (EUR)
     settings.setdefault("calendar_prune_days_ahead",  21)
     settings.setdefault("startup_dedup_seconds",      90)
     settings.setdefault("atr_period",                 14)
-    settings.setdefault("m5_candle_count",            40)
+    settings.setdefault("m5_candle_count",            60)   # GBP/USD: needs more for EMA34
     settings.setdefault("spread_limits",              {"London": 5, "US": 5})
     settings.setdefault("max_trades_day",             20)
     settings.setdefault("max_losing_trades_day",      3)
@@ -246,13 +246,13 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("max_trades_london",          10)
     settings.setdefault("max_trades_us",              10)
     # session window hours
-    settings.setdefault("london_session_start_hour",  16)
+    settings.setdefault("london_session_start_hour",  15)   # GBP/USD: was 16 (EUR)
     settings.setdefault("london_session_end_hour",    20)
-    settings.setdefault("us_session_start_hour",      21)  # v1.0: US session enabled
+    settings.setdefault("us_session_start_hour",      20)   # GBP/USD: was 21 (EUR)
     settings.setdefault("us_session_end_hour",        23)  # v1.0: US session enabled
-    settings.setdefault("us_session_early_end_hour",   3)  # v1.0: US cont enabled
+    settings.setdefault("us_session_early_end_hour",  99)   # GBP/USD: disabled (was 3 for EUR cont)
     settings.setdefault("dead_zone_start_hour",        4)   # 04:00 SGT — dead zone start
-    settings.setdefault("dead_zone_end_hour",          15)   # 15:59 SGT — covers Tokyo (EUR/USD inactive)
+    settings.setdefault("dead_zone_end_hour",           7)   # GBP/USD: dead zone ends 07:59 SGT
     # report schedule times (SGT)
     settings.setdefault("daily_report_hour_sgt",       7)   # 07:50 SGT — daily report
     settings.setdefault("daily_report_minute_sgt",    50)
@@ -264,7 +264,7 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("monthly_report_minute_sgt",   0)
     # Tokyo/Asian session
     settings.setdefault("tokyo_session_start_hour",    8)
-    settings.setdefault("tokyo_session_end_hour",     15)
+    settings.setdefault("tokyo_session_end_hour",     14)   # GBP/USD: Tokyo ends 14:00 SGT
     settings.setdefault("max_trades_tokyo",           10)
     # global concurrent-trade cap (0 = per-pair limits only)
     settings.setdefault("max_total_open_trades",       1)
@@ -272,13 +272,13 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("tp2_rr_reference",            3.0)
     # minimum units after margin guard — reject micro-orders gracefully
     settings.setdefault("min_trade_units",           1000)
-    # EUR/USD only
+    # GBP/USD v2.0: SL=15p TP=25p
     settings.setdefault("pair_sl_tp", {
-        "GBP_USD": {"sl_pips": 20, "tp_pips": 33, "pip_value_usd": 10.0, "be_trigger_pips": 22},
+        "GBP_USD": {"sl_pips": 15, "tp_pips": 25, "pip_value_usd": 10.0, "be_trigger_pips": 15},  # GBP v2.0
     })
     # dead zone = pre-Tokyo gap 04:00–07:59 SGT (overrides any stale setdefault above)
     settings["dead_zone_start_hour"] = int(settings.get("dead_zone_start_hour", 4))
-    settings["dead_zone_end_hour"]   = int(settings.get("dead_zone_end_hour",  15))
+    settings["dead_zone_end_hour"]   = 7   # HARDCODED for GBP/USD — prevents stale volume overriding
     # Ensure Tokyo threshold is present in session_thresholds
     st = settings.setdefault("session_thresholds", {})
     st.setdefault("Tokyo", 5)
@@ -342,7 +342,7 @@ def get_session(now: datetime, settings: dict = None):
     st      = s.get("session_thresholds", {})
     sessions = _build_sessions(s)
     for name, macro, start, end, fallback_thr in sessions:
-        if start <= h <= end:
+        if start <= h < end:   # exclusive end — prevents boundary overlap
             return name, macro, int(st.get(macro, fallback_thr))
     return None, None, None
 
@@ -524,8 +524,8 @@ def compute_sl_usd(levels: dict, settings: dict) -> float:
         except (TypeError, ValueError):
             pass
     pip = float(levels.get("pip_size", 0.0001))
-    log.warning("compute_sl_usd: no valid SL in levels — using 18p emergency fallback")
-    return round(18 * pip, 7)
+    log.warning("compute_sl_usd: no valid SL in levels — using 15p GBP/USD emergency fallback")
+    return round(15 * pip, 7)
 
 
 def compute_tp_usd(levels: dict, sl_usd: float, settings: dict) -> float:

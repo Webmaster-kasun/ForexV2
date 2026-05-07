@@ -149,7 +149,7 @@ def main():
     # Avoids re-reading secrets + creating new HTTP sessions every 5 minutes.
     _alert = TelegramAlert()
 
-    logger.info('%s — Scheduler starting', settings.get('bot_name', 'Fiber Scalp v1.5'))
+    logger.info('%s — Scheduler starting', settings.get('bot_name', 'Cable Scalp v2.0'))
     logger.info('DATA_DIR : %s', DATA_DIR)
     logger.info('Python   : %s', sys.version.split()[0])
     for warning in run_startup_checks():
@@ -259,9 +259,9 @@ def main():
         _trader  = OandaTrader(demo=bool(settings.get('demo_mode', True)))
         _summary = _trader.login_with_summary()
         _balance = _summary["balance"] if _summary else 0.0
-        _threshold = int(settings.get('signal_threshold', 4))
+        _threshold = int(settings.get('signal_threshold', 5))
         _mode    = 'DEMO' if settings.get('demo_mode', True) else 'LIVE'
-        _version = settings.get('bot_name', 'Fiber Scalp v1.5')
+        _version = settings.get('bot_name', 'Cable Scalp v2.0')
 
         # ── Startup message deduplication ──────────────────────────────────
         # Suppress duplicate startup alerts when Railway restarts the container
@@ -289,8 +289,8 @@ def main():
                 dead_zone_start=int(settings.get('dead_zone_start_hour', 4)),
                 dead_zone_end=int(settings.get('dead_zone_end_hour', 7)),
                 tokyo_start=int(settings.get('tokyo_session_start_hour', 8)),
-                tokyo_end=int(settings.get('tokyo_session_end_hour', 15)),
-                london_start=int(settings.get('london_session_start_hour', 16)),
+                tokyo_end=int(settings.get('tokyo_session_end_hour', 14)),
+                london_start=int(settings.get('london_session_start_hour', 15)),
                 london_end=int(settings.get('london_session_end_hour', 20)),
                 us_start=int(settings.get('us_session_start_hour', 21)),
                 us_end=int(settings.get('us_session_end_hour', 23)),

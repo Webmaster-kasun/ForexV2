@@ -117,7 +117,7 @@ def load_settings() -> dict:
 
     original_keys = set(settings.keys())
 
-    settings.setdefault('bot_name', 'Cable Scalp v1.0')
+    settings.setdefault('bot_name', 'Cable Scalp v2.0')
     settings.setdefault('enabled', True)
     settings.setdefault('cycle_minutes', 5)
     settings.setdefault('db_retention_days', 90)
@@ -136,26 +136,26 @@ def load_settings() -> dict:
     settings.setdefault('max_trades_us', 10)
     settings.setdefault('max_losing_trades_session', 4)
     # Signal engine
-    settings.setdefault('orb_fresh_minutes',         60)
-    settings.setdefault('orb_aging_minutes',         120)
-    settings.setdefault('min_rr_ratio',              1.6)   # 1.70x RR for EUR/USD
+    settings.setdefault('orb_fresh_minutes',         45)   # GBP/USD: was 60 (EUR)
+    settings.setdefault('orb_aging_minutes',         90)   # GBP/USD: was 120 (EUR)
+    settings.setdefault('min_rr_ratio',              1.6)   # 1.67x RR for GBP/USD
     # H1 trend filter
     settings.setdefault('h1_filter_enabled',        True)
     settings.setdefault('h1_filter_mode',           'score_aware')  # score_aware: score 4 needs alignment; score 5/6 allow neutral but block opposite
     settings.setdefault('h1_ema_period',            21)
-    settings.setdefault('ema_fast_period',           9)
-    settings.setdefault('ema_slow_period',           21)
-    settings.setdefault('orb_formation_minutes',     15)
+    settings.setdefault('ema_fast_period',           13)   # GBP/USD: was 9 (EUR)
+    settings.setdefault('ema_slow_period',           34)   # GBP/USD: was 21 (EUR)
+    settings.setdefault('orb_formation_minutes',     30)   # GBP/USD: was 15 (EUR)
     settings.setdefault('calendar_prune_days_ahead', 21)
     settings.setdefault('startup_dedup_seconds',     90)
     settings.setdefault('atr_period',                14)
-    settings.setdefault('m5_candle_count',           40)
+    settings.setdefault('m5_candle_count',           60)   # GBP/USD: needs more for EMA34
     # Session windows
-    settings.setdefault('london_session_start_hour', 16)
+    settings.setdefault('london_session_start_hour', 15)   # GBP/USD: was 16 (EUR)
     settings.setdefault('london_session_end_hour',   20)
-    settings.setdefault('us_session_start_hour',     99)  # disabled — 0% WR
-    settings.setdefault('us_session_end_hour',       99)  # disabled
-    settings.setdefault('us_session_early_end_hour',  3)
+    settings.setdefault('us_session_start_hour',     20)   # GBP/USD: US session enabled
+    settings.setdefault('us_session_end_hour',       23)   # GBP/USD: US ends 23:00
+    settings.setdefault('us_session_early_end_hour', 99)   # GBP/USD: disabled
     settings.setdefault('dead_zone_start_hour',       4)
     settings.setdefault('dead_zone_end_hour',         7)
     # Report schedule
@@ -169,7 +169,7 @@ def load_settings() -> dict:
     settings.setdefault('monthly_report_minute_sgt',  0)
     # Tokyo session
     settings.setdefault('tokyo_session_start_hour',   8)
-    settings.setdefault('tokyo_session_end_hour',    15)
+    settings.setdefault('tokyo_session_end_hour',    14)   # GBP/USD: was 15 (EUR)
     settings.setdefault('max_trades_tokyo',          10)
     # Global concurrent-trade cap
     settings.setdefault('max_total_open_trades',      1)
@@ -178,13 +178,13 @@ def load_settings() -> dict:
     # minimum units after margin guard — reject micro-orders gracefully
     settings.setdefault('min_trade_units',           1000)
     settings.setdefault('max_units',                 20000)
-    settings.setdefault('score_risk_usd',             {'4': 30, '5': 40, '6': 50})
-    settings.setdefault('position_partial_usd',       30)  # legacy fallback for score 4
-    settings.setdefault('position_full_usd',          40)  # legacy fallback for score 5
-    settings.setdefault('telegram_min_score_alert',   4)  # suppress WATCHING below this score
-    # EUR/USD fixed pip SL/TP — pip_value_usd static $10.00 (USD-quoted pair)
+    settings.setdefault('score_risk_usd',             {'5': 30, '6': 40})  # GBP: no score-4 trade
+    settings.setdefault('position_partial_usd',       30)  # legacy fallback for score 5
+    settings.setdefault('position_full_usd',          40)  # legacy fallback for score 6
+    settings.setdefault('telegram_min_score_alert',   5)   # GBP: suppress below score 5
+    # GBP/USD fixed pip SL/TP — pip_value_usd static $10.00 (USD-quoted pair)
     settings.setdefault('pair_sl_tp', {
-        'GBP_USD': {'sl_pips': 20, 'tp_pips': 33, 'pip_value_usd': 10.0, 'be_trigger_pips': 22},
+        'GBP_USD': {'sl_pips': 15, 'tp_pips': 25, 'pip_value_usd': 10.0, 'be_trigger_pips': 15},  # GBP v2.0
     })
 
     if set(settings.keys()) != original_keys:

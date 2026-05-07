@@ -1,4 +1,4 @@
-"""Telegram message templates for Fiber Scalp v2.1
+"""Telegram message templates for Cable Scalp v2.0 — GBP/USD
 AtomicFX-style: clean, state-change only, minimal noise.
 """
 from __future__ import annotations
@@ -35,8 +35,8 @@ def _mini_stats(s: dict) -> str:
 def _split_banner(banner: str) -> tuple[str, str]:
     """Extract pair from banner.
     Handles both:
-      '🇬🇧 LONDON [EUR/USD]'  → ('🇬🇧 LONDON [EUR/USD]', 'EUR/USD')
-      'Fiber Scalp v2.1 | EUR/USD' → ('Fiber Scalp v2.1', 'EUR/USD')
+      '🇬🇧 LONDON [GBP/USD]'  → ('🇬🇧 LONDON [GBP/USD]', 'GBP/USD')
+      'Cable Scalp v2.0 | GBP/USD' → ('Cable Scalp v2.0', 'GBP/USD')
     """
     if "[" in banner and "]" in banner:
         pair = banner[banner.index("[")+1 : banner.index("]")]
@@ -61,7 +61,7 @@ def msg_signal_update(
     banner, session, direction, score, position_usd, cpr_width_pct,
     detail_lines, news_penalty=0, raw_score=None, decision="WATCHING",
     reason="", mandatory_checks=None, quality_checks=None,
-    execution_checks=None, cycle_minutes=5, signal_threshold=4,
+    execution_checks=None, cycle_minutes=5, signal_threshold=5,
     setup="", orb_age_min=None, orb_formed=False,
     h1_trend="UNKNOWN", h1_aligned=True, h1_relation=None, h1_filter_mode="score_aware",
 ) -> str:
@@ -280,7 +280,7 @@ def msg_daily_cap(cap_type, count, limit, window="", daily_pnl=None,
 
 # ── 8b. New day ───────────────────────────────────────────────────────────────
 
-def msg_new_day_resume(prev_day_pnl=None, prev_day_trades=0, london_open_sgt="16:00") -> str:
+def msg_new_day_resume(prev_day_pnl=None, prev_day_trades=0, london_open_sgt="15:00") -> str:
     prev = (f"Yesterday: {prev_day_trades} trade(s)  ${prev_day_pnl:+.2f}\n"
             if prev_day_trades > 0 and prev_day_pnl is not None else "")
     return (
@@ -390,7 +390,7 @@ def msg_startup(
     max_trades_london=10, max_trades_us=10, max_trades_tokyo=10,
     max_losing_day=3, daily_risk_cap_usd=120, trading_day_start_hour=8,
     us_early_end=3, dead_zone_start=4, dead_zone_end=7,
-    tokyo_start=8, tokyo_end=15, london_start=16, london_end=20,
+    tokyo_start=8, tokyo_end=14, london_start=15, london_end=20,
     us_start=21, us_end=23, max_total_open=1,
     position_full_usd=40, position_partial_usd=30, score_6_risk_usd=50, session_thresholds=None,
     tg_min_score=4, h1_filter_enabled=True, h1_filter_mode="score_aware",
@@ -410,7 +410,7 @@ def msg_startup(
     return (
         f"🚀 {version} started\n{_DIV}\n"
         f"Mode:      {mode}  |  Balance: ${balance:,.2f}\n"
-        f"Pair:      EUR/USD (Fiber)\n"
+        f"Pair:      GBP/USD (Cable)\n"
         f"Strategy:  M5 EMA + ORB + CPR  |  Cycle: {cycle_minutes} min\n"
         f"Min score: {min_score}/6  |  Alerts: score ≥{tg_min_score} only\n"
         f"Risk:      ${position_partial_usd} (score 4)  |  ${position_full_usd} (score 5)  |  ${score_6_risk_usd} (score 6)\n"

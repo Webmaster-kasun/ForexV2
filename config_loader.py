@@ -132,7 +132,7 @@ def load_settings() -> dict:
     # ── Persistent defaults — applied on startup if not in volume settings ───
     settings.setdefault('spread_limits', {'London': 4, 'US': 5, 'US_Cont': 5, 'Tokyo': 4})
     settings.setdefault('max_trades_day', 12)
-    settings.setdefault('max_losing_trades_day', 4)
+    settings.setdefault('max_losing_trades_day', 2)   # stop after 2 losses/day
     settings.setdefault('max_trades_london', 4)
     settings.setdefault('max_trades_us', 4)
     settings.setdefault('max_trades_us_cont', 4)
@@ -143,7 +143,8 @@ def load_settings() -> dict:
     settings.setdefault('min_rr_ratio',              1.6)   # 1.67x RR for GBP/USD
     # H1 trend filter
     settings.setdefault('h1_filter_enabled',        True)
-    settings.setdefault('h1_filter_mode',           'soft')  # 'soft'=observe only | 'strict'=block
+    settings.setdefault('h1_filter_mode',           'score_aware')
+    settings.setdefault('h4_filter_enabled',        True)   # H4 macro trend — blocks counter-trend
     settings.setdefault('h1_ema_period',            21)
     settings.setdefault('ema_fast_period',           9)
     settings.setdefault('ema_slow_period',           21)
@@ -151,6 +152,9 @@ def load_settings() -> dict:
     settings.setdefault('calendar_prune_days_ahead', 21)
     settings.setdefault('startup_dedup_seconds',     90)
     settings.setdefault('atr_period',                14)
+    settings.setdefault('atr_sl_multiplier',         2.0)   # SL = 2x M15 ATR
+    settings.setdefault('atr_sl_multiplier',         2.0)   # SL = 2x M15 ATR
+    settings.setdefault('sl_pips_max',               40)   # SL ceiling
     settings.setdefault('m5_candle_count',           40)
     # Session windows
     settings.setdefault('london_session_start_hour', 16)
@@ -177,10 +181,10 @@ def load_settings() -> dict:
     settings.setdefault('tp2_rr_reference',           3.0)
     # minimum units after margin guard — reject micro-orders gracefully
     settings.setdefault('min_trade_units',           1000)
-    settings.setdefault('telegram_min_score_alert',   4)  # suppress WATCHING below this score
+    settings.setdefault('telegram_min_score_alert',   5)  # score 5+ only
     # GBP/USD fixed pip SL/TP — pip_value_usd $10.00 static (USD-quoted pair)
     settings.setdefault('pair_sl_tp', {
-        'GBP_USD': {'sl_pips': 18, 'tp_pips': 30, 'pip_value_usd': 10.0, 'be_trigger_pips': 20},
+        'GBP_USD': {'sl_pips': 15, 'tp_pips': 25, 'pip_value_usd': 10.0, 'be_trigger_pips': 15},  # GBP v2.0
     })
 
     # Keep US and US_Cont separately identifiable in config-driven logic.

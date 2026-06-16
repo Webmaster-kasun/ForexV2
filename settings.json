@@ -18,7 +18,7 @@
     }
   },
   "_comment_global": "Global defaults \u2014 used as fallback when a key is absent from the pair block.",
-  "signal_threshold": 4,
+  "signal_threshold": 5,
   "position_full_usd": 198,
   "position_partial_usd": 148,
   "pip_size": 0.0001,
@@ -30,7 +30,7 @@
   "telegram_show_margin": true,
   "max_concurrent_trades": 1,
   "max_trades_day": 1,
-  "max_losing_trades_day": 1,
+  "max_losing_trades_day": 2,
   "max_trades_london": 1,
   "max_trades_us": 1,
   "max_losing_trades_session": 1,
@@ -45,10 +45,9 @@
   },
   "session_only": true,
   "session_thresholds": {
-    "London": 4,
-    "US": 4,
     "Tokyo": 5,
-    "US_Cont": 4
+    "London": 5,
+    "US": 5
   },
   "news_filter_enabled": true,
   "news_relevant_currencies": [
@@ -103,14 +102,14 @@
   "tp2_rr_reference": 3.0,
   "pair_sl_tp": {
     "GBP_USD": {
-      "sl_pips": 18,
+      "sl_pips": 15,
       "tp_pips": 25,
       "pip_value_usd": 10.0,
-      "be_trigger_pips": 20
+      "be_trigger_pips": 15
     }
   },
   "min_trade_units": 1000,
-  "telegram_min_score_alert": 4,
+  "telegram_min_score_alert": 5,
   "h1_filter_enabled": true,
   "h1_filter_mode": "strict",
   "h1_ema_period": 21,
@@ -120,5 +119,10 @@
   "max_trades_us_cont": 1,
   "tokyo_fresh_cross_min_score": 4,
   "orb_max_age_minutes": 120,
-  "cpr_max_width_pct": 0.3
+  "cpr_max_width_pct": 0.3,
+  "h4_filter_enabled": true,
+  "score_risk_usd": {
+    "5": 30,
+    "6": 40
+  }
 }

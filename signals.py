@@ -337,11 +337,7 @@ class SignalEngine:
         _pair_cfg   = _pair_sl_tp.get(instrument, {})
 
         if _pair_cfg.get("sl_pips") and _pair_cfg.get("tp_pips"):
-            # Fixed pip mode -- pair-specific SL and TP
-            # pip_value_usd: dollar value of 1 pip for 1 standard lot (100k units).
-            # GBP/USD = $10.00 (standard for USD-quoted pairs).
-            # sl_risk_per_unit_usd = sl_pips * (pip_value_usd / 100_000)
-            # This gives units = position_usd / sl_risk_per_unit_usd -> target USD risk for GBP/USD.
+            # Fixed pip mode — SL=15p TP=25p from pair_sl_tp in settings
             _sl_pips_fixed  = int(_pair_cfg["sl_pips"])
             _tp_pips_fixed  = int(_pair_cfg["tp_pips"])
             # pip_value_usd: static $10.00 for GBP/USD
@@ -367,7 +363,44 @@ class SignalEngine:
         sl_pips = _sl_pips_fixed
         tp_pips = _tp_pips_fixed
 
-        # -- 8. Levels dict ---------------------------------------------------
+        # -- 8. H4 MACRO TREND FILTER (NEW — blocks counter-trend trades) --------
+        # Root cause: SELL WR=11% because bot sells in uptrending market.
+        # Fix: fetch H4 EMA50. If H4 bullish → SELL signals blocked.
+        #                       If H4 bearish → BUY signals blocked.
+        _h4_filter_enabled = bool((settings or {}).get("h4_filter_enabled", True))
+        _h4_trend = "UNKNOWN"
+        if _h4_filter_enabled and direction != "NONE":
+            try:
+                _h4_closes, _, _ = self._fetch_candles_simple(instrument, "H4", 60)
+                if len(_h4_closes) >= 51:
+                    _h4_ema50 = self._ema_series(_h4_closes, 50)[-1]
+                    _h4_price = _h4_closes[-1]
+                    if _h4_price > _h4_ema50:   _h4_trend = "BULLISH"
+                    elif _h4_price < _h4_ema50: _h4_trend = "BEARISH"
+                    else:                        _h4_trend = "FLAT"
+                    levels["h4_trend"]    = _h4_trend
+                    levels["h4_ema50"]    = round(_h4_ema50, _dp)
+            except Exception as _h4e:
+                log.warning("H4 trend fetch failed: %s", _h4e)
+
+        # Block counter-trend signals based on H4
+        _h4_block = False
+        _h4_reason = ""
+        if _h4_filter_enabled and _h4_trend not in ("UNKNOWN", "FLAT"):
+            if _h4_trend == "BULLISH" and direction == "SELL":
+                _h4_block  = True
+                _h4_reason = f"H4 BULLISH (EMA50) — SELL blocked. Only BUY allowed."
+            elif _h4_trend == "BEARISH" and direction == "BUY":
+                _h4_block  = True
+                _h4_reason = f"H4 BEARISH (EMA50) — BUY blocked. Only SELL allowed."
+        if _h4_block:
+            reasons.append(f"🚫 H4 filter: {_h4_reason}")
+            blockers.append(_h4_reason)
+        else:
+            if _h4_trend != "UNKNOWN":
+                reasons.append(f"✅ H4 {_h4_trend} — {direction} aligned")
+
+        # -- 9. Levels dict ---------------------------------------------------
         # -- H1 trend filter ------------------------------------------------
         _h1_enabled = bool((settings or {}).get("h1_filter_enabled", True))
         _h1_period  = int((settings or {}).get("h1_ema_period", 21))
